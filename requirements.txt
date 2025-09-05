@@ -1,0 +1,19 @@
+# Core FastAPI
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# Database
+sqlalchemy==1.4.48
+psycopg2-binary==2.9.9
+python-dotenv==1.0.0
+
+# File handling
+python-multipart==0.0.6
+unstructured[local-inference]==0.10.30
+
+# PDF generation
+reportlab==4.0.7
+
+# Basic utilities
+requests==2.31.0
+beautifulsoup4==4.12.2

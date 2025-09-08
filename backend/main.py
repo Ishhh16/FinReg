@@ -17,6 +17,23 @@ from reportlab.lib import colors
 from reportlab.lib.units import inch
 from sqlalchemy.orm import Session
 
+import io
+from typing import Any
+from fastapi import Query
+# Optional PDF parsers
+try:
+    import PyPDF2
+    HAS_PYPDF2 = True
+except Exception:
+    HAS_PYPDF2 = False
+
+try:
+    from pdfminer.high_level import extract_text as pdfminer_extract_text
+    HAS_PDFMINER = True
+except Exception:
+    HAS_PDFMINER = False
+
+
 # Basic document processing
 try:
     from unstructured.partition.auto import partition
@@ -655,6 +672,159 @@ def create_enhanced_pdf_report(report_text: str, mappings: List[RegulatoryMappin
         story.append(table)
     
     doc.build(story)
+# === NEW: PDF paragraph parsing + lightweight vector index =====================
+
+def _normalize_ws(s: str) -> str:
+    return re.sub(r'\s+', ' ', s).strip()
+
+def _split_paragraphs(page_text: str) -> List[str]:
+    # split on blank lines; also handle long blocks by sentence-ish chunking
+    chunks = [p.strip() for p in re.split(r'\n\s*\n', page_text) if p.strip()]
+    # If PDF text has no blank lines, fall back to chunking every ~4 sentences
+    if len(chunks) <= 1:
+        sentences = re.split(r'(?<=[.!?])\s+', _normalize_ws(page_text))
+        buf, out = [], []
+        for s in sentences:
+            buf.append(s)
+            if len(buf) >= 4 or sum(len(x) for x in buf) > 700:
+                out.append(' '.join(buf))
+                buf = []
+        if buf:
+            out.append(' '.join(buf))
+        chunks = out
+    # clean and keep substantial paragraphs only
+    return [c for c in map(_normalize_ws, chunks) if len(c) >= 120]
+
+def parse_pdf_to_page_paragraphs(pdf_path: str) -> List[Dict[str, Any]]:
+    """
+    Returns: list of dicts: { 'page': int (1-based), 'text': str }
+    """
+    results: List[Dict[str, Any]] = []
+
+    # Preferred: PyPDF2 (page-wise access is straightforward)
+    if HAS_PYPDF2:
+        try:
+            with open(pdf_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                for i, page in enumerate(reader.pages):
+                    try:
+                        txt = page.extract_text() or ""
+                    except Exception:
+                        txt = ""
+                    for para in _split_paragraphs(txt):
+                        results.append({"page": i + 1, "text": para})
+            if results:
+                return results
+        except Exception:
+            pass
+
+    # Fallback: pdfminer (whole-doc; we’ll approximate page splits)
+    if HAS_PDFMINER:
+        try:
+            full = pdfminer_extract_text(pdf_path) or ""
+            # very rough page heuristics: look for form feed or large gaps
+            rough_pages = re.split(r'\f|\n\s{10,}\n', full)
+            if len(rough_pages) <= 1:
+                rough_pages = re.split(r'\n{6,}', full)  # desperate fallback
+            for i, ptxt in enumerate(rough_pages):
+                for para in _split_paragraphs(ptxt):
+                    results.append({"page": i + 1, "text": para})
+            if results:
+                return results
+        except Exception:
+            pass
+
+    # Last resort: if unstructured is present, get elements and bucket by page if possible
+    if HAS_UNSTRUCTURED:
+        try:
+            elements = partition(filename=pdf_path)
+            # some element types may expose .metadata.page_number; guard carefully
+            for el in elements:
+                txt = str(el).strip()
+                if len(txt) < 50:
+                    continue
+                page_no = getattr(getattr(el, "metadata", None), "page_number", None)
+                page_no = int(page_no) if isinstance(page_no, int) else None
+                for para in _split_paragraphs(txt):
+                    results.append({"page": page_no or 1, "text": para})
+            if results:
+                return results
+        except Exception:
+            pass
+
+    # If nothing worked, try reading as text (unlikely for real PDFs, but safe)
+    try:
+        with open(pdf_path, "r", encoding="utf-8", errors="ignore") as f:
+            txt = f.read()
+        # pretend it is page 1
+        for para in _split_paragraphs(txt):
+            results.append({"page": 1, "text": para})
+    except Exception:
+        pass
+
+    return results
+
+
+# --------- Tiny hashed bag-of-words encoder + cosine search (no external deps) --
+
+TOKEN_RE = re.compile(r"\b[a-zA-Z0-9]{2,}\b")
+
+def _tokenize(text: str) -> List[str]:
+    return [t.lower() for t in TOKEN_RE.findall(text)]
+
+def _hash_token(t: str, dim: int) -> int:
+    # stable hash to index
+    return (hash(t) & 0x7FFFFFFF) % dim
+
+def embed_hashed_bow(text: str, dim: int = 2048) -> np.ndarray:
+    vec = np.zeros(dim, dtype=np.float32)
+    toks = _tokenize(text)
+    if not toks:
+        return vec
+    for tok in toks:
+        vec[_hash_token(tok, dim)] += 1.0
+    # l2 normalize
+    norm = np.linalg.norm(vec)
+    if norm > 0:
+        vec = vec / norm
+    return vec
+
+def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
+    denom = (np.linalg.norm(a) * np.linalg.norm(b))
+    return float(np.dot(a, b) / denom) if denom > 0 else 0.0
+
+class ParagraphVectorIndex:
+    """
+    In-memory vector index for paragraph dicts {page:int, text:str}.
+    Uses hashed bag-of-words embeddings + cosine similarity.
+    """
+    def __init__(self, dim: int = 2048):
+        self.dim = dim
+        self.paragraphs: List[Dict[str, Any]] = []
+        self.embeddings: Optional[np.ndarray] = None
+
+    def fit(self, paragraphs: List[Dict[str, Any]]):
+        self.paragraphs = paragraphs
+        if not paragraphs:
+            self.embeddings = np.zeros((0, self.dim), dtype=np.float32)
+            return
+        embs = [embed_hashed_bow(p["text"], self.dim) for p in paragraphs]
+        self.embeddings = np.vstack(embs)
+
+    def query(self, query_text: str, k: int = 5) -> List[Tuple[int, float]]:
+        if self.embeddings is None or len(self.paragraphs) == 0:
+            return []
+        q = embed_hashed_bow(query_text, self.dim)
+        # cosine vs all
+        sims = (self.embeddings @ q)  # since all are unit-normalized
+        # top-k indices
+        k = max(1, min(k, sims.shape[0]))
+        top_idx = np.argpartition(-sims, k - 1)[:k]
+        # sort exact
+        top_sorted = top_idx[np.argsort(-sims[top_idx])]
+        return [(int(i), float(sims[i])) for i in top_sorted]
+# ===============================================================================
+
 
 # The new report generator class and related functions
 class EnhancedComplianceReportGenerator:
@@ -1329,6 +1499,79 @@ async def generate_basic_report(
 ):
     """Generate basic compliance report (legacy endpoint)"""
     return await generate_detailed_report(user_document, user_query)
+
+
+
+@app.post("/query-paragraphs")
+async def query_paragraphs(
+    pdf: UploadFile = File(...),
+    q: str = Form(...),
+    k: int = Form(5),
+):
+    """
+    Single-call endpoint:
+    - Parses the uploaded PDF into page-aware paragraphs
+    - Builds a lightweight in-memory vector index
+    - Returns the top-k matching paragraphs with page & snippet
+    """
+    temp_file_path = None
+    try:
+        # save temp
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{pdf.filename}") as tmp:
+            content = await pdf.read()
+            tmp.write(content)
+            temp_file_path = tmp.name
+
+        # parse into paragraphs with page numbers
+        page_paras = parse_pdf_to_page_paragraphs(temp_file_path)
+
+        if not page_paras:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Could not extract any text paragraphs from the PDF"}
+            )
+
+        # build index and query
+        index = ParagraphVectorIndex(dim=2048)
+        index.fit(page_paras)
+        hits = index.query(q, k=max(1, min(int(k), 20)))
+
+        # format response
+        results = []
+        for idx, score in hits:
+            para = page_paras[idx]
+            text = para["text"]
+            # build a small snippet around the first match of a query token if possible
+            tokens = _tokenize(q)
+            loc = -1
+            for t in tokens:
+                loc = text.lower().find(t.lower())
+                if loc != -1:
+                    break
+            if loc == -1:
+                snippet = text[:350]
+            else:
+                start = max(0, loc - 140)
+                end = min(len(text), loc + 210)
+                snippet = text[start:end]
+            results.append({
+                "page": para.get("page", None),
+                "score": round(score, 4),
+                "snippet": snippet.strip()
+            })
+
+        return {"query": q, "k": len(results), "results": results}
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"query failed: {str(e)}"})
+
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except:
+                pass
+
 
 @app.get("/health")
 def health_check():

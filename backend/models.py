@@ -1,12 +1,8 @@
 from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text
 from sqlalchemy.sql import func
 
-# Handle both relative and direct imports
-try:
-    from .database import Base
-except ImportError:
-    from database import Base
-
+# Always use relative import consistently
+from .database import Base
 
 class ComplianceReport(Base):
     __tablename__ = "compliance_reports"

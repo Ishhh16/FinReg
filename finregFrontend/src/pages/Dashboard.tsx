@@ -1,6 +1,6 @@
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Upload, FileText, Shield, CheckCircle, AlertCircle } from "lucide-react";
+import { Upload, FileText, Shield, CheckCircle, AlertCircle, Download } from "lucide-react";
 import { useState, useCallback, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -11,6 +11,9 @@ const Dashboard = () => {
   const [stats, setStats] = useState<any>(null);
   const [loadingStats, setLoadingStats] = useState(false);
   const [statsError, setStatsError] = useState<string | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analysisResults, setAnalysisResults] = useState<{query: string, k: number, results: Array<{page: number, score: number, snippet: string}>} | null>(null);
+  const [pdfReportBlob, setPdfReportBlob] = useState<Blob | null>(null);
 
   useEffect(() => {
     setLoadingStats(true);
@@ -73,6 +76,78 @@ const Dashboard = () => {
     }
   }, [toast]);
 
+  const handleAnalyze = useCallback(async () => {
+    if (!uploadedFile) return;
+
+    setAnalyzing(true);
+    try {
+      // First, get the paragraph analysis (JSON)
+      const formData = new FormData();
+      formData.append('pdf', uploadedFile);
+      formData.append('q', 'financial regulatory compliance analysis');
+      formData.append('k', '5');
+
+      const response = await fetch("http://localhost:8000/query-paragraphs", {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Analysis failed: ${response.statusText}`);
+      }
+
+      const results = await response.json();
+      setAnalysisResults(results);
+      
+      // Then, generate the PDF report (but don't auto-download)
+      const reportFormData = new FormData();
+      reportFormData.append('user_document', uploadedFile);
+      reportFormData.append('user_query', 'Generate a detailed compliance report with section-by-section regulatory mapping and specific citation analysis.');
+
+      const reportResponse = await fetch("http://localhost:8000/generate-detailed-report/", {
+        method: 'POST',
+        body: reportFormData,
+      });
+
+      if (reportResponse.ok) {
+        const blob = await reportResponse.blob();
+        setPdfReportBlob(blob);
+      }
+      
+      toast({
+        title: "Analysis completed",
+        description: `Found ${results.k} relevant sections. PDF report ready for download!`,
+      });
+    } catch (error) {
+      toast({
+        title: "Analysis failed", 
+        description: error instanceof Error ? error.message : "Unknown error occurred",
+        variant: "destructive",
+      });
+    } finally {
+      setAnalyzing(false);
+    }
+  }, [uploadedFile, toast]);
+
+  const handleDownloadReport = useCallback(() => {
+    if (!pdfReportBlob || !uploadedFile) return;
+
+    const url = window.URL.createObjectURL(pdfReportBlob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = `compliance_report_${uploadedFile.name}_${new Date().toISOString().slice(0, 10)}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+
+    toast({
+      title: "Report downloaded",
+      description: "Your compliance report has been downloaded successfully.",
+    });
+  }, [pdfReportBlob, uploadedFile, toast]);
+
   const tips = [
     {
       icon: Shield,
@@ -129,8 +204,13 @@ const Dashboard = () => {
                   <div className="space-y-2">
                     <h3 className="text-xl font-semibold text-primary">File Ready for Analysis</h3>
                     <p className="text-muted-foreground">{uploadedFile.name}</p>
-                    <Button variant="hero" className="glow-button mt-4">
-                      Analyze Document
+                    <Button 
+                      variant="hero" 
+                      className="glow-button mt-4"
+                      onClick={handleAnalyze}
+                      disabled={analyzing}
+                    >
+                      {analyzing ? "Analyzing..." : "Analyze Document"}
                     </Button>
                   </div>
                 ) : (
@@ -158,9 +238,64 @@ const Dashboard = () => {
           </Card>
         </div>
 
+        {/* PDF Report Download Card */}
+        {pdfReportBlob && (
+          <div className="max-w-4xl mx-auto mb-16">
+            <Card className="glass border-0 p-8 animate-slide-up" style={{ animationDelay: '0.1s' }}>
+              <div className="text-center py-6">
+                <div className="flex flex-col items-center space-y-4">
+                  <div className="bg-green-500/10 p-6 rounded-full">
+                    <FileText className="w-12 h-12 text-green-500" />
+                  </div>
+                  <div className="space-y-2">
+                    <h3 className="text-xl font-semibold text-green-500">Analysis Report Ready</h3>
+                    <p className="text-muted-foreground">
+                      Your comprehensive compliance analysis report has been generated successfully.
+                    </p>
+                    <p className="text-sm text-muted-foreground">
+                      The report includes detailed regulatory mappings, compliance gaps, and recommendations.
+                    </p>
+                  </div>
+                  <Button 
+                    variant="default" 
+                    className="bg-green-500 hover:bg-green-600 text-white"
+                    onClick={handleDownloadReport}
+                  >
+                    <Download className="w-4 h-4 mr-2" />
+                    Download Report PDF
+                  </Button>
+                </div>
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {/* Analysis Results */}
+        {analysisResults && (
+          <div className="max-w-4xl mx-auto mb-16">
+            <Card className="glass border-0 p-8 animate-slide-up" style={{ animationDelay: '0.2s' }}>
+              <div className="text-center py-8">
+                <h3 className="text-xl font-semibold mb-4">Analysis Results</h3>
+                <p className="text-muted-foreground mb-6">Found {analysisResults.k} relevant sections for: "{analysisResults.query}"</p>
+                <div className="space-y-4 text-left">
+                  {analysisResults.results.map((result, index) => (
+                    <div key={index} className="bg-muted/10 rounded-lg p-4">
+                      <div className="flex justify-between items-start mb-2">
+                        <span className="font-semibold text-primary">Page {result.page || 'N/A'}</span>
+                        <span className="text-sm text-muted-foreground">Score: {result.score}</span>
+                      </div>
+                      <p className="text-sm text-muted-foreground">{result.snippet}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </Card>
+          </div>
+        )}
+
         {/* Backend Stats Output */}
         <div className="max-w-4xl mx-auto mb-16">
-          <Card className="glass border-0 p-8 animate-slide-up" style={{ animationDelay: '0.2s' }}>
+          <Card className="glass border-0 p-8 animate-slide-up" style={{ animationDelay: '0.3s' }}>
             <div className="text-center py-8">
               <h3 className="text-xl font-semibold mb-4">Backend Analysis Stats</h3>
               {loadingStats ? (

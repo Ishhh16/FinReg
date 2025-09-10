@@ -10,6 +10,7 @@ from collections import Counter
 
 from fastapi import FastAPI, File, Form, UploadFile, Depends
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -214,12 +215,24 @@ class EnhancedComplianceAnalyzer:
         semantic_score = self._calculate_semantic_similarity(policy_content, full_text)
         reasoning_parts.append(f"Semantic similarity: {semantic_score:.2f}")
         
+        # 5. Financial Domain Terms Bonus (additional 20% if found)
+        financial_terms = [
+            'financial', 'compliance', 'audit', 'report', 'disclosure', 'control', 
+            'risk', 'management', 'internal', 'assessment', 'policy', 'procedure',
+            'regulation', 'requirement', 'standard', 'monitoring', 'review',
+            'documentation', 'record', 'maintain', 'establish', 'implement'
+        ]
+        financial_matches = sum(1 for term in financial_terms if term in policy_lower)
+        financial_bonus = min(financial_matches / len(financial_terms), 0.2)
+        reasoning_parts.append(f"Financial terms: {financial_matches}/{len(financial_terms)} found")
+        
         # Weighted combination with enhanced citation focus
         final_score = (
-            citation_score * 0.35 + 
-            intent_score * 0.30 + 
-            indicator_score * 0.25 + 
-            semantic_score * 0.10
+            citation_score * 0.30 + 
+            intent_score * 0.25 + 
+            indicator_score * 0.20 + 
+            semantic_score * 0.05 + 
+            financial_bonus * 0.20
         )
         
         reasoning = "; ".join(reasoning_parts)
@@ -388,8 +401,11 @@ class EnhancedComplianceAnalyzer:
                 )
                 
                 # Only include mappings above a minimum threshold
-                if confidence > 0.10:  # Lowered threshold to capture more potential matches
+                if confidence > 0.05:  # Lowered threshold to capture more potential matches
                     evidence = self._find_enhanced_evidence(section.content, reg_info)
+                    
+                    # Debug logging for confidence scores
+                    print(f"🔍 Section '{section.title[:50]}...' -> {reg_category}.{reg_section_key}: {confidence:.3f}")
                     
                     mapping = RegulatoryMapping(
                         policy_section=section,
@@ -672,6 +688,38 @@ def create_enhanced_pdf_report(report_text: str, mappings: List[RegulatoryMappin
         story.append(table)
     
     doc.build(story)
+def extract_text_from_pdf(pdf_path: str) -> str:
+    """Extract text content from PDF for compliance analysis"""
+    try:
+        # Try PyPDF2 first
+        if HAS_PYPDF2:
+            with open(pdf_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                text_parts = []
+                for page in reader.pages:
+                    try:
+                        text = page.extract_text() or ""
+                        text_parts.append(text)
+                    except Exception:
+                        continue
+                if text_parts:
+                    return "\n\n".join(text_parts)
+        
+        # Try pdfminer as fallback
+        if HAS_PDFMINER:
+            return pdfminer_extract_text(pdf_path) or ""
+            
+        # Try unstructured as last resort
+        if HAS_UNSTRUCTURED:
+            elements = partition(filename=pdf_path)
+            return "\n".join([str(el) for el in elements])
+            
+    except Exception as e:
+        print(f"Error extracting text from PDF: {e}")
+    
+    return ""
+
+
 # === NEW: PDF paragraph parsing + lightweight vector index =====================
 
 def _normalize_ws(s: str) -> str:
@@ -1383,6 +1431,15 @@ app = FastAPI(
     version="2.2.0",
 )
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8080", "http://127.0.0.1:8080", "http://localhost:3000", "*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.get("/")
 def read_root():
     return {"message": "FinReg Phase 2.2 API - Enhanced Citation-Specific Regulatory Mapping 🏛️", "status": "operational"}
@@ -1406,9 +1463,15 @@ async def generate_detailed_report(
         # Extract content based on file type
         user_doc_content = ""
         try:
-            if user_document.content_type and user_document.content_type.startswith("text/"):
+            if user_document.content_type and user_document.content_type == "application/pdf":
+                # Handle PDF files properly
+                user_doc_content = extract_text_from_pdf(temp_file_path)
+            elif user_document.content_type and user_document.content_type.startswith("text/"):
                 with open(temp_file_path, "r", encoding="utf-8") as f:
                     user_doc_content = f.read()
+            elif user_document.filename and user_document.filename.lower().endswith('.pdf'):
+                # Handle PDF by file extension if content type is not set
+                user_doc_content = extract_text_from_pdf(temp_file_path)
             elif HAS_UNSTRUCTURED:
                 elements = partition(filename=temp_file_path)
                 user_doc_content = "\n".join([str(el) for el in elements])
@@ -1419,7 +1482,7 @@ async def generate_detailed_report(
                 except:
                     return JSONResponse(
                         status_code=400,
-                        content={"error": "Could not process document. Please upload a text file."}
+                        content={"error": "Could not process document. Please upload a text file or PDF."}
                     )
         except Exception as e:
             return JSONResponse(
@@ -1429,6 +1492,9 @@ async def generate_detailed_report(
 
         if not user_doc_content.strip():
             return JSONResponse(status_code=400, content={"error": "Document appears to be empty"})
+
+        print(f"📄 Extracted {len(user_doc_content)} characters from {user_document.filename}")
+        print(f"📄 First 200 characters: {user_doc_content[:200]}...")
 
         # Enhanced analysis with citation tracking
         analyzer = EnhancedComplianceAnalyzer()

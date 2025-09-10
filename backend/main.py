@@ -48,7 +48,7 @@ try:
     from .database import engine, get_db
     from .ingestion import get_enhanced_vector_store, EnhancedMockVectorStore
 except ImportError:
-    import models
+    from backend import models
     from database import engine, get_db
     from ingestion import get_enhanced_vector_store, EnhancedMockVectorStore
 

@@ -34,11 +34,18 @@ const Landing = () => {
       {/* Hero Section */}
       <div className="container mx-auto px-4 pt-20 pb-16">
         <div className="text-center animate-slide-up">
-          <h1 className="text-6xl md:text-8xl font-bold mb-6 tracking-tight text-white">
-            FinReg
+          <div className="flex items-center justify-center mb-6">
+            <img 
+              src="/finreg-logo.svg" 
+              alt="FinReg Logo" 
+              className="h-16 md:h-20"
+            />
+          </div>
+          <h1 className="text-5xl md:text-7xl font-bold mb-6 tracking-tight text-white">
+            Financial Regulation Made Simple
           </h1>
           <p className="text-xl md:text-2xl text-muted-foreground mb-12 max-w-3xl mx-auto">
-            AI-Powered Financial Regulation Analyzer
+            AI-Powered Compliance Analysis & Regulatory Citations
           </p>
         </div>
 

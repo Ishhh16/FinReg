@@ -44,14 +44,15 @@ class RegulatoryTextProcessor:
             except Exception as e:
                 print(f"⚠️ Could not initialize LLM: {e}")
         
-        # Fallback regex patterns for extraction when LLM is not available
+        # Indian regulatory citation patterns
         self.citation_patterns = [
-            r'(\d+\s+CFR\s+(?:Part\s+)?\d+(?:\.\d+)*)',  # CFR citations
-            r'(Sarbanes-Oxley Act(?:,?\s+Sec(?:tion)?\.?\s+\d+(?:\([a-z]\))?)?)',  # SOX
-            r'(Dodd-Frank Act(?:,?\s+Sec(?:tion)?\.?\s+\d+)?)',  # Dodd-Frank
-            r'(Securities Exchange Act(?:,?\s+Sec(?:tion)?\.?\s+\d+(?:\([a-z]\))?)?)',  # Securities Exchange Act
-            r'(Bank Secrecy Act(?:,?\s+Sec(?:tion)?\.?\s+\d+)?)',  # BSA
-            r'(\d+\s+U\.S\.C\.?\s+§?\s*\d+(?:\([a-z]\))?)',  # USC citations
+            r'(Section\s+\d+(?:[A-Z]?),?\s+Companies Act,?\s+2013)',  # Companies Act sections
+            r'(Rule\s+\d+[A-Z]?,?\s+Companies\s+\([^)]+\)\s+Rules,?\s+20\d{2})',  # Companies Rules
+            r'(Companies\s+\([^)]+\)\s+Order,?\s+20\d{2})',  # MCA Orders
+            r'(MSME-1|DPT-3|AOC-4|MGT-7A?|ADT-1|DIR-3\s+KYC|CSR-2)',  # MCA forms
+            r'(Securities and Exchange Board of India\s+\([^)]+\)\s+Regulations,?\s+20\d{2})',  # SEBI
+            r'(Reserve Bank of India\s+\([^)]+\)\s+Directions?,?\s+20\d{2})',  # RBI
+            r'(Income Tax Act,?\s+1961)',  # Income Tax Act
         ]
     
     def process_raw_regulation(self, raw_text: str, source_url: str, regulation_category: str) -> Optional[ProcessedRegulation]:
@@ -155,71 +156,46 @@ class EnhancedRegulatoryIngestion:
     def __init__(self):
         self.processor = RegulatoryTextProcessor()
         
-        # Enhanced raw regulatory content with real citations
+        # Indian regulatory content examples for testing
         self.raw_regulatory_sources = [
             {
                 "raw_text": """
-                12 CFR Part 326.8 - Brokered deposits
+                Section 137, Companies Act, 2013 - Filing of Financial Statements
                 
-                (a) Restrictions on brokered deposits. A depository institution that is not well capitalized may not accept, renew, or roll over any brokered deposit unless it has obtained a waiver from the FDIC. A depository institution that is adequately capitalized may accept, renew, or roll over brokered deposits only if it pays no more than 120 basis points above certain benchmark rates for deposits of similar maturity.
+                (1) A copy of the financial statement, including consolidated financial statement, if any, shall be filed with the Registrar within thirty days from the date on which the annual general meeting is held or ought to have been held.
                 
-                (b) Definitions. For purposes of this section:
-                (1) Brokered deposit has the meaning set forth in section 29 of the FDI Act (12 U.S.C. 1831f).
-                (2) Well capitalized, adequately capitalized, and undercapitalized have the meanings set forth in the prompt corrective action regulations applicable to the institution.
+                (3) If any company fails to file financial statement before the expiry of the period specified under sub-section (1), such company and its every officer who is in default shall be punishable with fine which shall not be less than fifty thousand rupees but which may extend to twenty-five lakh rupees and where the failure is a continuing one, with a further fine which may extend to one hundred rupees for every day after the first during which the failure continues.
                 
-                Banks must maintain detailed records of all brokered deposit arrangements and report quarterly on their brokered deposit activities to demonstrate compliance with rate restrictions and capital adequacy requirements.
+                Every company shall mandatorily file Form AOC-4 along with the required attachments within the prescribed timeline to avoid penalties.
                 """,
-                "source_url": "https://www.ecfr.gov/current/title-12/chapter-III/subchapter-B/part-326",
-                "category": "FDIC_BROKERED_DEPOSITS"
+                "source_url": "https://www.mca.gov.in/",
+                "category": "INDIAN_COMPANIES_ACT"
             },
             {
                 "raw_text": """
-                Sarbanes-Oxley Act, Section 404(a) - Management Assessment of Internal Controls
+                Section 96, Companies Act, 2013 - Annual General Meeting
                 
-                The Securities and Exchange Commission shall prescribe rules requiring each annual report required by section 13(a) or 15(d) of the Securities Exchange Act of 1934 to contain an internal control report, which shall—
+                (1) Every company other than a One Person Company shall in each year hold a general meeting as its annual general meeting and shall specify the meeting as such in the notices calling it, and not more than fifteen months shall elapse between the date of one annual general meeting of a company and that of the next.
                 
-                (1) state the responsibility of management for establishing and maintaining adequate internal control structure and procedures for financial reporting; and
+                Provided that in case of the first annual general meeting, it shall be held within a period of nine months from the date of closing of the first financial year of the company.
                 
-                (2) contain an assessment, as of the end of the most recent fiscal year of the issuer, of the effectiveness of the internal control structure and procedures of the issuer for financial reporting.
-                
-                Management must document, test, and evaluate the design and operating effectiveness of internal controls over financial reporting annually. This includes maintaining evidence of testing procedures, identifying material weaknesses, and providing detailed remediation plans for any control deficiencies identified during the assessment process.
+                The AGM must be conducted within 6 months from the financial year end for most companies and proper notices, quorum, and minutes must be maintained.
                 """,
-                "source_url": "https://www.sec.gov/about/laws/soa2002.pdf",
-                "category": "SEC_INTERNAL_CONTROLS"
+                "source_url": "https://www.mca.gov.in/",
+                "category": "INDIAN_COMPANIES_ACT"
             },
             {
                 "raw_text": """
-                12 CFR Part 353 - Anti-Money Laundering Program Requirements
+                Rule 16, Companies (Acceptance of Deposits) Rules, 2014 - Return of Deposits
                 
-                Section 353.3 - Minimum standards for anti-money laundering programs
+                (1) Every company which has accepted deposits or any monies which are not considered as deposits in terms of rule 2 of these rules during a financial year shall file a return in Form DPT-3 within sixty days from the commencement of the next financial year.
                 
-                Each FDIC-supervised institution shall develop and implement a written anti-money laundering program that includes, at a minimum:
+                (2) The return shall be accompanied by an auditor's certificate in the prescribed format where the company has accepted deposits during the financial year.
                 
-                (a) A system of internal controls to ensure ongoing compliance with the Bank Secrecy Act;
-                (b) Independent testing for compliance to be conducted by bank personnel or by an outside party;
-                (c) Designation of an individual or individuals responsible for coordinating and monitoring day-to-day compliance;
-                (d) Training for appropriate personnel; and
-                (e) Customer identification program requirements under 31 CFR 1020.220.
-                
-                The program must include risk-based procedures for conducting ongoing customer due diligence, including procedures for identifying and reporting suspicious transactions consistent with safe and sound banking practices. Banks must maintain comprehensive records of customer identification verification, transaction monitoring systems, and suspicious activity reporting procedures.
+                Companies must compile details of all deposits and non-deposit receipts and file DPT-3 by 30 June annually with requisite certifications.
                 """,
-                "source_url": "https://www.ecfr.gov/current/title-12/chapter-III/subchapter-B/part-353",
-                "category": "FDIC_AML_PROGRAM"
-            },
-            {
-                "raw_text": """
-                Consumer Financial Protection Act, Section 1036(a) - Unfair, Deceptive, or Abusive Acts or Practices
-                
-                The Bureau may take any action authorized under subtitle E to prevent a covered person or service provider from committing or engaging in an unfair, deceptive, or abusive act or practice under Federal law in connection with any transaction with a consumer for a consumer financial product or service, or the offering of a consumer financial product or service.
-                
-                12 CFR Part 1005.18 - Requirements for financial institutions offering prepaid accounts
-                
-                (b) Pre-acquisition disclosure requirements. Before a consumer acquires a prepaid account, a financial institution must provide clear and conspicuous disclosures about account terms, fees, and conditions. These disclosures must include all periodic fees, per-transaction fees, and third-party fees that may be imposed in connection with the prepaid account.
-                
-                Financial institutions must implement comprehensive consumer complaint management systems, maintain detailed records of consumer interactions, and provide regular training to staff on fair lending practices and consumer protection requirements.
-                """,
-                "source_url": "https://www.ecfr.gov/current/title-12/chapter-X/part-1005",
-                "category": "CFPB_CONSUMER_PROTECTION"
+                "source_url": "https://www.mca.gov.in/",
+                "category": "INDIAN_COMPANIES_ACT"
             }
         ]
     
@@ -304,92 +280,74 @@ class EnhancedRegulatoryIngestion:
                 patterns.extend(terms)
         
         # Extract specific nouns and regulatory actions
-        regulatory_actions = re.findall(r'\b(?:maintain|establish|implement|document|test|evaluate|monitor|report|disclose)\w*\b', text_lower)
-        patterns.extend(regulatory_actions)
+        words = requirement_summary.split()
+        key_words = [w.lower() for w in words if len(w) > 4 and w.isalpha()]
+        patterns.extend(key_words[:5])  # Top 5 key words
         
-        return list(set(patterns))  # Remove duplicates
+        return patterns
     
     def _extract_compliance_indicators(self, full_text: str) -> List[str]:
-        """Extract regex patterns for compliance detection"""
+        """Extract regex compliance indicators from full text"""
+        # Create regex patterns for key compliance terms
         indicators = []
         
-        # Extract key phrases and convert to regex patterns
-        key_phrases = re.findall(r'\b(?:must|shall|required?|establish|maintain|implement|ensure)\s+[^.]{10,50}', full_text, re.IGNORECASE)
+        key_terms = ['must', 'shall', 'required', 'mandatory', 'file', 'report', 'maintain', 
+                    'establish', 'implement', 'assess', 'evaluate', 'document', 'disclose']
         
-        for phrase in key_phrases:
-            # Convert to regex pattern
-            pattern = re.sub(r'\s+', r'\\s+', phrase.lower().strip())
-            indicators.append(pattern)
-        
-        # Add common compliance patterns
-        indicators.extend([
-            r'internal.*control',
-            r'risk.*management',
-            r'anti.*money.*laundering',
-            r'customer.*identification',
-            r'suspicious.*activity',
-            r'consumer.*protection',
-            r'brokered.*deposit'
-        ])
+        for term in key_terms:
+            if term in full_text.lower():
+                indicators.append(rf'\b{term}\b')
         
         return indicators
     
     def _create_section_key(self, citation_id: str) -> str:
-        """Create a clean section key from citation"""
-        # Convert citation to a clean key
-        key = re.sub(r'[^\w\s]', '', citation_id.lower())
-        key = re.sub(r'\s+', '_', key.strip())
+        """Create a section key from citation ID"""
+        # Normalize citation to create consistent keys
+        key = citation_id.lower()
+        key = re.sub(r'[^a-zA-Z0-9_]', '_', key)
+        key = re.sub(r'_+', '_', key).strip('_')
         return key[:50]  # Limit length
     
     def _format_category_title(self, category_key: str) -> str:
         """Format category key into readable title"""
-        parts = category_key.split('_')
-        formatted = []
-        
-        for part in parts:
-            if part.upper() in ['SEC', 'FDIC', 'CFPB', 'AML']:
-                formatted.append(part.upper())
-            else:
-                formatted.append(part.title())
-        
-        return ' '.join(formatted)
+        return category_key.replace('_', ' ').title()
+
+def ingest_documents_to_vector_store():
+    """Main ingestion function for regulatory documents"""
+    try:
+        print("🔄 Starting regulatory document ingestion...")
+        get_enhanced_vector_store()
+        print("✅ Document ingestion completed")
+    except Exception as e:
+        print(f"⚠️ Document ingestion warning: {e}")
+        return False
+    return True
 
 def get_enhanced_vector_store():
-    """Initialize vector store with enhanced regulatory content"""
-    if not LANGCHAIN_IMPORTS_OK or not all([Chroma, OllamaEmbeddings]):
-        print("Warning: Vector store components not available. Using enhanced mock store.")
-        return EnhancedMockVectorStore()
-
+    """Get enhanced vector store with LLM-processed regulatory content"""
     try:
-        # Initialize the enhanced ingestion pipeline
+        if not LANGCHAIN_IMPORTS_OK:
+            print("⚠️ Langchain not available, using enhanced mock vector store")
+            return EnhancedMockVectorStore()
+        
+        # Initialize enhanced regulatory ingestion
         ingestion = EnhancedRegulatoryIngestion()
         processed_regulations = ingestion.process_all_regulations()
-        
-        # Create enhanced mappings
         enhanced_mappings = ingestion.create_enhanced_mappings(processed_regulations)
         
-        # Ensure the database directory exists
-        persist_dir = "./chroma_db"
-        os.makedirs(persist_dir, exist_ok=True)
-
-        embeddings = OllamaEmbeddings(model="llama3")
-        vector_store = Chroma(
-            embedding_function=embeddings, 
-            persist_directory=persist_dir
-        )
-
-        # Check if vector store needs population
-        try:
-            collection_count = len(vector_store.get()["ids"]) if hasattr(vector_store, "get") else 0
-        except:
-            collection_count = 0
-
+        # Initialize vector store with enhanced Ollama embeddings
+        embeddings = OllamaEmbeddings(model="nomic-embed-text")
+        vector_store = Chroma(embedding_function=embeddings, persist_directory="./chroma_db")
+        
+        # Check if we need to populate the vector store
+        collection_count = vector_store._collection.count()
+        
         if collection_count == 0:
             print("🔄 Populating vector store with enhanced regulatory documents...")
             ingest_enhanced_documents_to_store(vector_store, processed_regulations)
         else:
             print(f"✅ Vector store already contains {collection_count} documents")
-
+        
         # Store enhanced mappings for later use
         vector_store.enhanced_mappings = enhanced_mappings
         return vector_store
@@ -403,7 +361,7 @@ def ingest_enhanced_documents_to_store(vector_store, processed_regulations: List
     if not LANGCHAIN_IMPORTS_OK or not RecursiveCharacterTextSplitter:
         print("⚠️ Text splitter not available, skipping ingestion")
         return
-
+    
     # Initialize text splitter
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=800,  # Smaller chunks for more precise matching
@@ -411,11 +369,103 @@ def ingest_enhanced_documents_to_store(vector_store, processed_regulations: List
         length_function=len,
         is_separator_regex=False,
     )
-
+    
     documents_to_ingest = []
     metadatas = []
-
+    
     for reg in processed_regulations:
+        # Create chunks from full regulation text
+        chunks = text_splitter.split_text(reg.full_text_for_embedding)
+        
+        for i, chunk in enumerate(chunks):
+            documents_to_ingest.append(chunk)
+            metadatas.append({
+                "citation": reg.citation_id,
+                "requirement_summary": reg.requirement_summary,
+                "source_url": reg.source_url,
+                "category": reg.regulation_category,
+                "chunk_id": i,
+                "processing_confidence": reg.processing_confidence
+            })
+    
+    # Add documents to the vector store
+    print(f"📥 Adding {len(documents_to_ingest)} enhanced document chunks to vector store...")
+    try:
+        vector_store.add_texts(documents_to_ingest, metadatas=metadatas)
+        print("✅ Enhanced documents successfully added to vector store")
+    except Exception as e:
+        print(f"❌ Error adding enhanced documents to vector store: {e}")
+
+class EnhancedMockVectorStore:
+    """Enhanced mock vector store with processed regulatory content"""
+    
+    def __init__(self):
+        ingestion = EnhancedRegulatoryIngestion()
+        self.processed_regulations = ingestion.process_all_regulations()
+        self.enhanced_mappings = ingestion.create_enhanced_mappings(self.processed_regulations)
+        print("📝 Enhanced mock vector store initialized with LLM-processed regulatory content")
+    
+    def as_retriever(self):
+        return EnhancedMockRetriever(self.processed_regulations)
+    
+    def add_texts(self, texts, metadatas=None):
+        print(f"📝 Mock: Would add {len(texts)} enhanced texts to vector store")
+
+class EnhancedMockRetriever:
+    """Enhanced mock retriever with processed content"""
+    
+    def __init__(self, processed_regulations: List[ProcessedRegulation]):
+        self.processed_regulations = processed_regulations
+    
+    def invoke(self, query):
+        # Return processed regulations as mock retrieval
+        if Document:  # If langchain Document is available
+            return [
+                Document(
+                    page_content=reg.full_text_for_embedding,
+                    metadata={
+                        "citation": reg.citation_id,
+                        "source": reg.regulation_category,
+                        "url": reg.source_url,
+                        "requirement": reg.requirement_summary
+                    }
+                )
+                for reg in self.processed_regulations
+            ]
+        else:
+            # Return simple dict format if Document class not available
+            return [
+                {
+                    "page_content": reg.full_text_for_embedding,
+                    "metadata": {
+                        "citation": reg.citation_id,
+                        "source": reg.regulation_category,
+                        "url": reg.source_url,
+                        "requirement": reg.requirement_summary
+                    }
+                }
+                for reg in self.processed_regulations
+            ]
+
+if __name__ == "__main__":
+    # Test the enhanced ingestion pipeline
+    ingestion = EnhancedRegulatoryIngestion()
+    processed_regulations = ingestion.process_all_regulations()
+    enhanced_mappings = ingestion.create_enhanced_mappings(processed_regulations)
+    
+    print("\n" + "="*80)
+    print("ENHANCED REGULATORY MAPPINGS CREATED")
+    print("="*80)
+    
+    for category, data in enhanced_mappings.items():
+        print(f"\n📋 Category: {data['title']}")
+        for section_key, section_data in data['sections'].items():
+            print(f"  🏛️  Citation: {section_data['citation']}")
+            print(f"  📝 Requirement: {section_data['text'][:100]}...")
+            print(f"  🎯 Confidence: {section_data['processing_confidence']:.2f}")
+            print(f"  🔍 Intent Patterns: {len(section_data['intent_patterns'])}")
+            print(f"  ⚡ Compliance Indicators: {len(section_data['compliance_indicators'])}")
+            print()
         # Create chunks from full regulation text
         chunks = text_splitter.split_text(reg.full_text_for_embedding)
         

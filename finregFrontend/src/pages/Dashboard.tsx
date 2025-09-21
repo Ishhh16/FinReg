@@ -175,13 +175,10 @@ const Dashboard = () => {
     <div className="min-h-screen animated-bg">
       <div className="container mx-auto px-4 py-12">
         {/* Header */}
-        <div className="text-center mb-12 animate-slide-up">
-          <h1 className="text-4xl font-bold mb-4 text-white">
-            FinReg
-          </h1>
-          <p className="text-white text-lg">
+        <div className="max-w-4xl mx-auto mb-12 animate-slide-up">
+          <h1 className="text-5xl font-extrabold mb-4 text-white tracking-tight leading-tight">
             Start Your Compliance Check
-          </p>
+          </h1>
         </div>
 
         {/* Upload Section */}

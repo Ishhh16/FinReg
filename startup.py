@@ -53,14 +53,18 @@ def start_application():
     """Start the FastAPI application"""
     print("🚀 Starting FinReg API...")
     
+    port = os.getenv("PORT", "8000")
     cmd = [
         sys.executable, "-m", "uvicorn", 
         "backend.main:app",
         "--host", "0.0.0.0",
-        "--port", "8000",
-        "--reload"
+        "--port", port
     ]
     
+    # Only use reload in local development (when PORT is not set by cloud provider)
+    if not os.getenv("PORT"):
+        cmd.append("--reload")
+        
     try:
         subprocess.run(cmd, check=True)
     except KeyboardInterrupt:

@@ -46,3 +46,7 @@ pip-log.txt
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Allow regulatory PDF documents to be tracked
+!regulations/*.pdf
+

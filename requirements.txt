@@ -22,4 +22,7 @@ beautifulsoup4==4.12.2
 # Generative AI & Embeddings
 google-generativeai
 sentence-transformers
+langchain-community>=0.3.0
+langchain-text-splitters>=0.3.0
+
 

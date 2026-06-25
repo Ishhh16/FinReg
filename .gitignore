@@ -50,3 +50,8 @@ desktop.ini
 # Allow regulatory PDF documents to be tracked
 !regulations/*.pdf
 
+# Allow ChromaDB persistent store to be tracked to avoid heavy ingestion on Render
+!chroma_db/
+!chroma_db/**
+
+

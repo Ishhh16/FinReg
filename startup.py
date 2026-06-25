@@ -6,58 +6,44 @@ Handles database initialization and vector store setup
 
 import os
 import sys
-import time
 import subprocess
 from pathlib import Path
+
+# Configure stdout to handle UTF-8 encoding (especially emojis) on Windows
+sys.stdout.reconfigure(encoding='utf-8')
 
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).parent / "backend"))
 
-def wait_for_database():
-    """Wait for database to be ready"""
-    print("🔄 Waiting for database to be ready...")
-    max_attempts = 30
-    attempt = 0
-    
-    while attempt < max_attempts:
-        try:
-            from backend.database import engine
-            from sqlalchemy import text
-            
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-                print("✅ Database is ready!")
-                return True
-        except Exception as e:
-            print(f"⏳ Database not ready (attempt {attempt + 1}/{max_attempts}): {e}")
-            time.sleep(2)
-            attempt += 1
-    
-    print("❌ Database failed to become ready")
-    return False
-
-def initialize_database():
-    """Initialize database tables"""
-    try:
-        print("🔄 Initializing database tables...")
-        from backend import models
-        from backend.database import engine
-        
-        models.Base.metadata.create_all(bind=engine)
-        print("✅ Database tables initialized successfully")
-        return True
-    except Exception as e:
-        print(f"❌ Failed to initialize database: {e}")
-        return False
-
 def setup_vector_store():
-    """Setup vector store with regulatory documents"""
+    """Setup vector store with actual regulatory PDF chunks from ingest.py"""
     try:
-        print("🔄 Setting up vector store...")
-        from backend.ingestion import ingest_documents_to_vector_store
+        import chromadb
+        from pathlib import Path
         
-        ingest_documents_to_vector_store()
-        print("✅ Vector store setup completed")
+        chroma_dir = Path(__file__).parent / "chroma_db"
+        collection_name = "regulations_knowledge_base"
+        
+        # Check if database already exists and contains documents
+        db_exists = False
+        if chroma_dir.exists():
+            try:
+                client = chromadb.PersistentClient(path=str(chroma_dir))
+                if collection_name in [c.name for c in client.list_collections()]:
+                    if client.get_collection(collection_name).count() > 0:
+                        db_exists = True
+            except Exception:
+                pass
+                
+        if db_exists:
+            print("✅ Vector store already exists with PDF chunks. Skipping build.")
+            return True
+            
+        print("🔄 Regulations database not found. Ingesting PDF regulations...")
+        import subprocess
+        import sys
+        subprocess.run([sys.executable, "ingest.py"], check=True)
+        print("✅ Vector store setup completed with PDF chunks!")
         return True
     except Exception as e:
         print(f"⚠️ Vector store setup warning: {e}")
@@ -68,7 +54,7 @@ def start_application():
     print("🚀 Starting FinReg API...")
     
     cmd = [
-        "python", "-m", "uvicorn", 
+        sys.executable, "-m", "uvicorn", 
         "backend.main:app",
         "--host", "0.0.0.0",
         "--port", "8000",
@@ -86,18 +72,10 @@ def start_application():
 def main():
     print("🏁 Starting FinReg application initialization...")
     
-    # Step 1: Wait for database
-    if not wait_for_database():
-        sys.exit(1)
-    
-    # Step 2: Initialize database
-    if not initialize_database():
-        sys.exit(1)
-    
-    # Step 3: Setup vector store (non-critical)
+    # Step 1: Setup vector store (non-critical)
     setup_vector_store()
     
-    # Step 4: Start application
+    # Step 2: Start application
     start_application()
 
 if __name__ == "__main__":

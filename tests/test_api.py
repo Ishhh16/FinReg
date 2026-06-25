@@ -13,13 +13,13 @@ def test_enhanced_report():
     
     # Read test file
     import os
-    test_file_path = os.path.join(os.path.dirname(__file__), 'fixtures', 'test_compliance.txt')
-    with open(test_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+    test_file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'regulations', 'compliance rules pdf.pdf')
+    with open(test_file_path, 'rb') as f:
         content = f.read()
     
     # Prepare the file for upload
     files = {
-        'user_document': ('test_compliance.txt', content, 'text/plain')
+        'user_document': ('compliance_rules_pdf.pdf', content, 'application/pdf')
     }
     
     data = {

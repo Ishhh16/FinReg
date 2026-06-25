@@ -28,7 +28,7 @@ from datetime import datetime
 from collections import Counter
 from pydantic import BaseModel
 
-from fastapi import FastAPI, File, Form, UploadFile, Depends
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from reportlab.lib.pagesizes import letter
@@ -36,7 +36,6 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 from reportlab.lib import colors
 from reportlab.lib.units import inch
-from sqlalchemy.orm import Session
 
 def validate_uploaded_pdf(user_document: UploadFile) -> Tuple[Optional[bytes], Optional[JSONResponse]]:
     """Helper to validate file type, file size (10MB limit), and sanitize filename."""
@@ -78,24 +77,12 @@ def validate_uploaded_pdf(user_document: UploadFile) -> Tuple[Optional[bytes], O
             content={"error": "Internal error occurred while reading the uploaded file."}
         )
 
-# Import models and database functions
 try:
-    from . import models
-    from .database import engine, get_db
     from .utils import extract_text
     from .professional_enhanced_compliance import create_professional_compliance_report, ProfessionalEnhancedComplianceAnalyzer, generate_pdf_report_from_data
 except ImportError:
-    from backend import models
-    from database import engine, get_db
     from utils import extract_text
     from professional_enhanced_compliance import create_professional_compliance_report, ProfessionalEnhancedComplianceAnalyzer, generate_pdf_report_from_data
-
-# Initialize DB tables
-try:
-    models.Base.metadata.create_all(bind=engine)
-    logger.info("✅ Database tables created successfully")
-except Exception as e:
-    logger.warning(f"⚠️ Database initialization warning: {e}")
 
 @dataclass
 class PolicySection:
@@ -511,31 +498,7 @@ def health_check():
         "features": ["regulatory_mapping", "section_analysis", "confidence_scoring", "citation_tracking"]
     }
 
-@app.get("/analysis-stats")
-def get_analysis_stats(db: Session = Depends(get_db)):
-    """Get statistics about compliance analyses"""
-    try:
-        total_reports = db.query(models.ComplianceReport).count()
-        recent_reports = db.query(models.ComplianceReport).filter(
-            models.ComplianceReport.created_at >= datetime.now().replace(hour=0, minute=0, second=0)
-        ).count()
-        
-        analyzer = EnhancedComplianceAnalyzer()
-        
-        return {
-            "total_reports": total_reports,
-            "reports_today": recent_reports,
-            "regulatory_categories": len(analyzer.regulatory_mappings),
-            "specific_citations_tracked": sum(
-                len(cat_data["sections"]) 
-                for cat_data in analyzer.regulatory_mappings.values()
-            ),
-            "mapping_engine": "enhanced_v3.0_indian_focused",
-            "compliance_framework": "Indian Companies Act, 2013"
-        }
-    except Exception as e:
-        logger.error(f"Error in get_analysis_stats: {e}", exc_info=True)
-        return JSONResponse(status_code=500, content={"error": "An internal error occurred while fetching analysis statistics."})
+
 
 @app.get("/regulatory-citations")
 def get_regulatory_citations():

@@ -56,9 +56,9 @@ graph TD
 
 ## 🛠️ Tech Stack
 
-*   **Backend**: Python, FastAPI, SQLAlchemy, PyMuPDF (fitz), LangChain
+*   **Backend**: Python, FastAPI, PyMuPDF (fitz), LangChain
 *   **Frontend**: Vite, React, TypeScript, TailwindCSS, Radix UI, Lucide Icons
-*   **Database**: PostgreSQL (Metadata), ChromaDB (Vector database)
+*   **Database**: ChromaDB (Vector database)
 *   **AI Engine**: Gemini 2.5 Flash, HuggingFace embeddings (`BAAI/bge-small-en-v1.5`)
 
 ---
@@ -76,8 +76,6 @@ FinReg/
 ├── backend/
 │   ├── main.py                     # FastAPI application & API endpoints
 │   ├── professional_enhanced_compliance.py # RAG matching and ReportLab generator
-│   ├── models.py                   # SQLAlchemy database models
-│   ├── database.py                 # PostgreSQL connection setup
 │   └── utils.py                    # PyMuPDF text extraction helpers
 ├── finregFrontend/
 │   ├── src/
@@ -96,7 +94,7 @@ FinReg/
 ├── reports/                        # Cached generated compliance PDFs (Git ignored except .gitkeep)
 ├── docs/                           # Project documentation
 ├── ingest.py                       # Ingestion runner for ChromaDB population
-├── startup.py                      # Database initializer & server launcher
+├── startup.py                      # Vector database setup & server launcher
 ├── .env.example                    # Environment template config
 └── .gitignore                      # Git ignore specifications
 ```
@@ -108,9 +106,6 @@ FinReg/
 Configure these variables in a `.env` file at the project root:
 
 ```bash
-# PostgreSQL Database connection
-DATABASE_URL=postgresql://finreg:finreg123@localhost:5432/finreg_db
-
 # Server listener config
 API_HOST=0.0.0.0
 API_PORT=8000
@@ -130,12 +125,8 @@ VITE_API_BASE_URL=http://localhost:8000
 ### Prerequisites
 *   Python 3.11+
 *   Node.js 18+
-*   PostgreSQL
 
-### 1. Database Setup
-Make sure your PostgreSQL server is active and the database name match `DATABASE_URL`.
-
-### 2. Backend Installation & Run
+### 1. Backend Installation & Run
 1. Create and activate a Python virtual environment:
    ```bash
    python -m venv venv
@@ -159,7 +150,7 @@ Make sure your PostgreSQL server is active and the database name match `DATABASE
    ```
    The API will listen at `http://localhost:8000`. Access docs at `http://localhost:8000/docs`.
 
-### 3. Frontend Installation & Run
+### 2. Frontend Installation & Run
 1. Navigate to the frontend directory:
    ```bash
    cd finregFrontend

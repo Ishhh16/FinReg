@@ -1,5 +1,7 @@
 import os
 import sys
+# Insert backend directory in python path for absolute import resolutions on cloud deployments
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tempfile
 import re
 import numpy as np

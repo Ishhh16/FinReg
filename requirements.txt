@@ -5,6 +5,7 @@ python-dotenv==1.0.0
 
 # File handling
 python-multipart==0.0.6
+pymupdf
 # unstructured[local-inference]==0.10.30 (commented to avoid onnxruntime conflicts with chromadb)
 
 # PDF generation

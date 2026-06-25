@@ -1,7 +1,27 @@
 import os
+import sys
 import tempfile
 import re
-import numpy as np 
+import numpy as np
+import uuid
+import logging
+from contextlib import asynccontextmanager
+
+# Configure stdout and stderr to handle UTF-8 encoding (especially emojis) on Windows
+sys.stdout.reconfigure(encoding='utf-8')
+
+# Initialize logger
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger("finreg_backend")
+
+from dotenv import load_dotenv
+from pathlib import Path
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,24 +38,64 @@ from reportlab.lib import colors
 from reportlab.lib.units import inch
 from sqlalchemy.orm import Session
 
+def validate_uploaded_pdf(user_document: UploadFile) -> Tuple[Optional[bytes], Optional[JSONResponse]]:
+    """Helper to validate file type, file size (10MB limit), and sanitize filename."""
+    if not user_document or not user_document.filename:
+        return None, JSONResponse(status_code=400, content={"error": "No file uploaded."})
+        
+    # Sanitize filename
+    raw_basename = os.path.basename(user_document.filename)
+    clean_filename = re.sub(r'[^a-zA-Z0-9._-]', '_', raw_basename)
+    
+    # Check extension
+    if not clean_filename.lower().endswith('.pdf'):
+        return None, JSONResponse(
+            status_code=400, 
+            content={"error": f"Invalid file type for {clean_filename}. Only PDF files are supported."}
+        )
+        
+    # Check MIME content type if available
+    if user_document.content_type and user_document.content_type != "application/pdf":
+        return None, JSONResponse(
+            status_code=400, 
+            content={"error": "Invalid content type. Only application/pdf is supported."}
+        )
+        
+    # Check file size (10MB maximum limit)
+    try:
+        content = user_document.file.read(10 * 1024 * 1024 + 1)
+        if len(content) > 10 * 1024 * 1024:
+            return None, JSONResponse(
+                status_code=400, 
+                content={"error": "File size exceeds the maximum allowed limit of 10MB."}
+            )
+        user_document.file.seek(0)
+        return content, None
+    except Exception as e:
+        logger.error(f"Error reading file uploads: {e}", exc_info=True)
+        return None, JSONResponse(
+            status_code=500, 
+            content={"error": "Internal error occurred while reading the uploaded file."}
+        )
+
 # Import models and database functions
 try:
     from . import models
     from .database import engine, get_db
-    from .ingestion import get_enhanced_vector_store, EnhancedMockVectorStore
-    from .professional_enhanced_compliance import create_professional_compliance_report
+    from .utils import extract_text
+    from .professional_enhanced_compliance import create_professional_compliance_report, ProfessionalEnhancedComplianceAnalyzer, generate_pdf_report_from_data
 except ImportError:
     from backend import models
     from database import engine, get_db
-    from ingestion import get_enhanced_vector_store, EnhancedMockVectorStore
-    from professional_enhanced_compliance import create_professional_compliance_report
+    from utils import extract_text
+    from professional_enhanced_compliance import create_professional_compliance_report, ProfessionalEnhancedComplianceAnalyzer, generate_pdf_report_from_data
 
 # Initialize DB tables
 try:
     models.Base.metadata.create_all(bind=engine)
-    print("✅ Database tables created successfully")
+    logger.info("✅ Database tables created successfully")
 except Exception as e:
-    print(f"⚠️ Database initialization warning: {e}")
+    logger.warning(f"⚠️ Database initialization warning: {e}")
 
 @dataclass
 class PolicySection:
@@ -68,7 +128,7 @@ class EnhancedComplianceAnalyzer:
     def __init__(self):
         self.regulatory_mappings = self._get_indian_mappings()
         self.vector_store = None
-        print("✅ Loaded Indian Companies Act compliance framework")
+        logger.info("✅ Loaded Indian Companies Act compliance framework")
     
     def _get_indian_mappings(self):
         """Indian Companies Act/Rules compliance framework"""
@@ -191,7 +251,7 @@ class EnhancedComplianceAnalyzer:
                             source_url=req_info.get("source_url", "")
                         ))
                         
-                        print(f"🇮🇳 Section '{section.title}' -> {req_key}: {confidence:.3f} (Evidence: {len(evidence)})")
+                        logger.info(f"🇮🇳 Section '{section.title}' -> {req_key}: {confidence:.3f} (Evidence: {len(evidence)})")
         
         return mappings
 
@@ -401,12 +461,34 @@ class IndianComplianceRequest(BaseModel):
     company_details: Optional[CompanyDetails] = None
     compliance_data: str
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("🚀 Starting up FinReg API - Preloading shared AI models and Vector DB...")
+    try:
+        from backend.professional_enhanced_compliance import get_shared_embeddings, get_shared_vector_store
+    except ImportError:
+        from professional_enhanced_compliance import get_shared_embeddings, get_shared_vector_store
+    get_shared_embeddings()
+    get_shared_vector_store()
+    logger.info("✅ Preloaded embeddings and ChromaDB client.")
+    yield
+    logger.info("🛑 Shutting down FinReg API...")
+
 # Initialize FastAPI app
 app = FastAPI(
     title="FinReg API - Indian Companies Act Compliance Checker",
     description="Compliance analysis focused exclusively on Indian Companies Act, Rules, and MCA forms with deadlines and documentation.",
     version="3.0.0",
+    lifespan=lifespan,
 )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    logger.error(f"Unhandled exception occurred: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"error": "An unexpected server error occurred. No internal details have been leaked."}
+    )
 
 # Add CORS middleware
 app.add_middleware(
@@ -452,7 +534,8 @@ def get_analysis_stats(db: Session = Depends(get_db)):
             "compliance_framework": "Indian Companies Act, 2013"
         }
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Error in get_analysis_stats: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "An internal error occurred while fetching analysis statistics."})
 
 @app.get("/regulatory-citations")
 def get_regulatory_citations():
@@ -478,7 +561,8 @@ def get_regulatory_citations():
             "categories": list(set(c["category"] for c in citations))
         }
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Error in get_regulatory_citations: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "An internal error occurred while fetching regulatory citations."})
 
 @app.post("/query-paragraphs")
 async def query_paragraphs(
@@ -486,51 +570,79 @@ async def query_paragraphs(
     q: str = Form(...),
     k: int = Form(5),
 ):
-    """Parse uploaded PDF and return top-k matching paragraphs"""
+    """Query the persistent regulations ChromaDB using BAAI/bge-small-en-v1.5 embeddings"""
     try:
-        print(f"📄 Processing PDF: {pdf.filename}")
-        print(f"🔍 Query: {q}")
-        print(f"📊 Returning top {k} results")
+        # Validate uploaded file
+        content, error_response = validate_uploaded_pdf(pdf)
+        if error_response:
+            return error_response
+            
+        clean_filename = os.path.basename(pdf.filename)
+        logger.info(f"📄 Processing query regulations search for: '{q}' (k={k}) in {clean_filename}")
         
-        # For now, return a mock response since this is primarily for frontend compatibility
-        # In a full implementation, you would parse the PDF and do vector similarity search
-        mock_results = {
+        # Load analyzer to reuse its persistent vector store connection
+        analyzer = ProfessionalEnhancedComplianceAnalyzer()
+        
+        # Query regulations database
+        results = analyzer.vector_store.similarity_search_with_score(q, k=k)
+        
+        output_results = []
+        for doc, score in results:
+            l2_dist = float(score)
+            cos_sim = 1.0 - (l2_dist / 2.0)
+            
+            output_results.append({
+                "page": doc.metadata.get("page_number", 1),
+                "score": round(cos_sim, 4),
+                "snippet": doc.page_content.strip(),
+                "source": doc.metadata.get("source_filename", "compliance rules pdf.pdf")
+            })
+            
+        return JSONResponse(content={
             "query": q,
-            "k": min(k, 5),
-            "results": [
-                {
-                    "page": 1,
-                    "score": 0.85,
-                    "snippet": "Financial statements preparation and annual return filing requirements as per Companies Act 2013..."
-                },
-                {
-                    "page": 2, 
-                    "score": 0.78,
-                    "snippet": "Board meeting minutes documenting compliance with statutory audit requirements and director responsibilities..."
-                },
-                {
-                    "page": 3,
-                    "score": 0.72,
-                    "snippet": "Annual General Meeting procedures and shareholder notification requirements under MCA guidelines..."
-                },
-                {
-                    "page": 4,
-                    "score": 0.68,
-                    "snippet": "Corporate governance framework implementation and independent director appointment criteria..."
-                },
-                {
-                    "page": 5,
-                    "score": 0.65,
-                    "snippet": "Risk management disclosure requirements and internal audit committee establishment..."
-                }
-            ][:k]
-        }
-        
-        return JSONResponse(content=mock_results)
+            "k": k,
+            "results": output_results
+        })
         
     except Exception as e:
-        print(f"❌ Error in query_paragraphs: {str(e)}")
-        return JSONResponse(status_code=500, content={"error": f"Query failed: {str(e)}"})
+        logger.error(f"Error in query_paragraphs: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "An unexpected error occurred while querying compliance paragraphs."})
+
+@app.post("/analyze-retrieval")
+async def analyze_retrieval(
+    user_document: UploadFile = File(...),
+):
+    """Parse uploaded company document and return retrieved regulation and company chunks for each requirement"""
+    try:
+        # Validate uploaded file
+        content, error_response = validate_uploaded_pdf(user_document)
+        if error_response:
+            return error_response
+            
+        clean_filename = os.path.basename(user_document.filename)
+        logger.info(f"📄 Running retrieval analysis for uploaded document: {clean_filename}")
+        
+        # Extract text using our robust utility
+        try:
+            from .utils import extract_text
+        except ImportError:
+            from utils import extract_text
+            
+        document_text = extract_text(content, filename=clean_filename)
+        
+        if not document_text.strip():
+            return JSONResponse(status_code=400, content={"error": "Uploaded document contains no readable text."})
+            
+        # Instantiate analyzer and get retrieval mapping
+        analyzer = ProfessionalEnhancedComplianceAnalyzer()
+        retrieval_mapping = analyzer.retrieve_compliance_context(document_text)
+        
+        return JSONResponse(content=retrieval_mapping)
+        
+    except Exception as e:
+        logger.error(f"Error in analyze-retrieval: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "An unexpected error occurred during document retrieval analysis."})
+
 
 @app.post("/generate-detailed-report/")
 async def generate_detailed_report(
@@ -539,76 +651,31 @@ async def generate_detailed_report(
 ):
     """Generate comprehensive enhanced compliance report from uploaded document"""
     try:
-        print(f"📄 Generating enhanced detailed report for: {user_document.filename}")
-        print(f"📝 Query: {user_query}")
-        
-        # Read the uploaded file
-        content = await user_document.read()
-        
-        # Extract text content from PDF or document
-        try:
-            # Try to extract as text first
-            document_text = content.decode('utf-8', errors='ignore')
+        # Validate uploaded file
+        content, error_response = validate_uploaded_pdf(user_document)
+        if error_response:
+            return error_response
             
-            # If it's very short, it might be a PDF that needs parsing
-            if len(document_text.strip()) < 100:
-                # Create a more comprehensive sample based on filename
-                company_name = user_document.filename.split('.')[0].replace('_', ' ').title()
-                document_text = f"""Compliance Documentation Analysis for {company_name}
-                
-                Board Meeting Minutes:
-                - Regular board meetings conducted quarterly with proper quorum
-                - Annual General Meeting held within statutory timelines  
-                - Directors present: Independent Directors and Executive Directors
-                - Resolutions passed for statutory compliance matters
-                - Minutes properly recorded and signed
-                
-                Financial Compliance:
-                - Annual Financial Statements prepared and audited
-                - Board's report includes all mandatory disclosures
-                - Auditor's report shows unqualified opinion
-                - Cash flow statements and notes to accounts prepared
-                - AOC-4 form filing completed within statutory deadline
-                
-                Annual Return and Regulatory Filings:
-                - MGT-7 Annual Return filed with updated shareholding details
-                - Register of Members maintained and updated regularly
-                - Director details updated in MCA records
-                - Registered office address confirmed
-                
-                Director Compliance:
-                - All directors have valid DIN numbers
-                - DIR-3 KYC forms filed for all directors annually
-                - Independent director declarations obtained
-                - Director appointment and resignation procedures followed
-                
-                Corporate Governance:
-                - Board committees constituted as per requirements
-                - Audit committee meetings held regularly
-                - Internal controls and risk management framework in place
-                - Related party transactions properly approved and disclosed
-                
-                Statutory Books and Records:
-                - Register of Directors maintained
-                - Register of Charges updated
-                - Minutes books properly maintained
-                - Statutory registers are up to date
-                
-                This comprehensive analysis covers key Indian Companies Act 2013 compliance areas based on the submitted documentation."""
-            
-        except:
-            # Fallback for binary files
-            company_name = user_document.filename.split('.')[0].replace('_', ' ').title()
-            document_text = f"Document analysis for {company_name} - comprehensive Indian Companies Act compliance review based on submitted materials."
+        clean_filename = os.path.basename(user_document.filename)
+        logger.info(f"📄 Generating enhanced detailed report for: {clean_filename}")
+        logger.info(f"📝 Query: {user_query}")
         
+        # Extract text using our robust utility
+        document_text = extract_text(content, filename=clean_filename)
+        
+        if not document_text.strip():
+            return JSONResponse(status_code=400, content={"error": "Uploaded document contains no readable text."})
+            
         # Generate professional enhanced compliance report
+        company_name = clean_filename.split('.')[0].replace('_', ' ').title()
         pdf_bytes = create_professional_compliance_report(
             text_content=document_text,
-            company_name=user_document.filename.split('.')[0].replace('_', ' ').title()
+            company_name=company_name
         )
         
         # Save to temporary file for response
-        pdf_filename = os.path.join(tempfile.gettempdir(), f"enhanced_detailed_report_{os.getpid()}.pdf")
+        report_uuid = str(uuid.uuid4())
+        pdf_filename = os.path.join(tempfile.gettempdir(), f"report_{report_uuid}.pdf")
         with open(pdf_filename, 'wb') as f:
             f.write(pdf_bytes)
         
@@ -619,26 +686,26 @@ async def generate_detailed_report(
         )
         
     except Exception as e:
-        print(f"❌ Error generating enhanced detailed report: {str(e)}")
-        return JSONResponse(status_code=500, content={"error": f"Error generating enhanced detailed report: {str(e)}"})
+        logger.error(f"Error generating enhanced detailed report: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "An unexpected error occurred while compiling the detailed PDF report."})
 
 @app.post("/indian-compliance-report")
 async def generate_indian_compliance_report(request: IndianComplianceRequest):
     """Generate Indian Companies Act compliance report from JSON input"""
     try:
-        print(f"🇮🇳 Generating Indian compliance report for {request.company_name}")
-        print(f"📄 Processing {len(request.compliance_data)} characters of compliance data")
+        logger.info(f"🇮🇳 Generating Indian compliance report for {request.company_name}")
+        logger.info(f"📄 Processing {len(request.compliance_data)} characters of compliance data")
         
         # Initialize analyzer
         analyzer = EnhancedComplianceAnalyzer()
         
         # Process the compliance data
         sections = analyzer.segment_document(request.compliance_data)
-        print(f"📄 Document segmented into {len(sections)} sections")
+        logger.info(f"📄 Document segmented into {len(sections)} sections")
         
         # Map to Indian regulations
         mappings = analyzer.map_to_regulations(sections)
-        print(f"🇮🇳 Generated {len(mappings)} Indian compliance mappings")
+        logger.info(f"🇮🇳 Generated {len(mappings)} Indian compliance mappings")
         
         document_stats = {
             "length": len(request.compliance_data),
@@ -652,7 +719,8 @@ async def generate_indian_compliance_report(request: IndianComplianceRequest):
         report_text = indian_reporter.render_report(checklist, "Indian Companies Act Compliance Analysis", document_stats)
         
         # Create PDF
-        pdf_filename = os.path.join(tempfile.gettempdir(), f"indian_compliance_report_{os.getpid()}.pdf")
+        report_uuid = str(uuid.uuid4())
+        pdf_filename = os.path.join(tempfile.gettempdir(), f"report_{report_uuid}.pdf")
         create_indian_compliance_pdf(report_text, checklist, mappings, pdf_filename, request.company_name)
         
         return FileResponse(
@@ -662,8 +730,155 @@ async def generate_indian_compliance_report(request: IndianComplianceRequest):
         )
         
     except Exception as e:
-        print(f"❌ Error generating Indian compliance report: {str(e)}")
-        return JSONResponse(status_code=500, content={"error": f"Error generating report: {str(e)}"})
+        logger.error(f"Error generating Indian compliance report: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "An unexpected error occurred while compiling the compliance checklist report."})
+
+import uuid
+
+@app.post("/analyze-compliance")
+async def analyze_compliance(
+    user_document: UploadFile = File(...),
+):
+    """Parse uploaded company document, perform Gemini compliance analysis, generate cached report, and return detailed JSON results"""
+    try:
+        # Validate uploaded file
+        content, error_response = validate_uploaded_pdf(user_document)
+        if error_response:
+            return error_response
+            
+        clean_filename = os.path.basename(user_document.filename)
+        logger.info(f"📄 Consolidated analyze-compliance request received for: {clean_filename}")
+        
+        # 2. Extract text using robust utility
+        document_text = extract_text(content, filename=clean_filename)
+        if not document_text.strip():
+            return JSONResponse(status_code=400, content={"error": "Uploaded document contains no readable text."})
+            
+        # 3. Instantiate professional analyzer and run RAG + Gemini analysis
+        analyzer = ProfessionalEnhancedComplianceAnalyzer()
+        company_name = clean_filename.split('.')[0].replace('_', ' ').title()
+        analysis_data = analyzer.analyze_document(document_text, company_name)
+        
+        # 4. Generate the PDF report immediately and save to cache
+        pdf_bytes = generate_pdf_report_from_data(analysis_data, company_name)
+        report_id = str(uuid.uuid4())
+        pdf_filename = os.path.join(tempfile.gettempdir(), f"report_{report_id}.pdf")
+        with open(pdf_filename, 'wb') as f:
+            f.write(pdf_bytes)
+        logger.info(f"💾 Saved report PDF to cache: {pdf_filename}")
+        
+        # 5. Format detailed analysis findings
+        findings_list = []
+        for item in analysis_data["detailed_analysis"]:
+            # Extract company evidence & regulation evidence quotes
+            ev_company = ""
+            ev_reg = ""
+            for ev in item.evidence_found:
+                if ev.section_reference == "Company Document":
+                    ev_company += ev.text_snippet + "\n"
+                else:
+                    ev_reg += ev.text_snippet + "\n"
+            ev_company = ev_company.strip()
+            ev_reg = ev_reg.strip()
+            
+            # Extract citation & page numbers from rag_metadata
+            citation_str = item.legal_citation
+            page_numbers_list = []
+            
+            rag = getattr(item, 'rag_metadata', None)
+            if rag:
+                reg_chunks = rag.get("regulation_chunks", [])
+                for r in reg_chunks:
+                    p_num = r.get("page_number", "Unknown")
+                    if p_num not in page_numbers_list:
+                        page_numbers_list.append(str(p_num))
+            
+            # Format recommendations
+            rec_text = ""
+            if item.recommendations:
+                rec_text = "\n".join([f"{r.priority} Priority: {r.action_required} (Timeline: {r.timeline})" for r in item.recommendations])
+            
+            findings_list.append({
+                "requirement_code": item.section_code,
+                "regulation_name": item.section_title,
+                "status": item.compliance_status.value,
+                "risk_level": item.risk_level.value,
+                "confidence_score": item.compliance_score, # out of 100
+                "gap_summary": item.gap_analysis,
+                "reasoning": item.compliance_rationale,
+                "evidence_company": ev_company,
+                "evidence_regulation": ev_reg,
+                "source_citations": citation_str,
+                "page_numbers": ", ".join(page_numbers_list) if page_numbers_list else "Unknown",
+                "recommendations": rec_text,
+                "rag_metadata": rag
+            })
+            
+        # 6. Format metrics and distribution summary
+        metrics = analysis_data["overall_metrics"]
+        
+        # Determine overall risk text description based on risk distribution
+        if metrics["risk_distribution"]["critical"] > 0:
+            overall_risk = "Critical"
+        elif metrics["risk_distribution"]["high"] > 0:
+            overall_risk = "High"
+        elif metrics["risk_distribution"]["medium"] > 0:
+            overall_risk = "Medium"
+        else:
+            overall_risk = "Low"
+            
+        # Overall confidence score average
+        conf_scores = [item.compliance_score for item in analysis_data["detailed_analysis"]]
+        avg_confidence = sum(conf_scores) / len(conf_scores) if conf_scores else 0.0
+        
+        summary_info = {
+            "compliant_count": metrics["compliance_distribution"]["fully_compliant"],
+            "partially_compliant_count": metrics["compliance_distribution"]["partially_compliant"],
+            "non_compliant_count": metrics["compliance_distribution"]["non_compliant"],
+            "total_count": metrics["total_requirements_assessed"],
+            "average_confidence": round(avg_confidence, 2),
+            "executive_summary": analysis_data["executive_summary"]
+        }
+        
+        response_json = {
+            "report_id": report_id,
+            "overall_score": metrics["overall_compliance_score"],
+            "overall_risk": overall_risk,
+            "findings": findings_list,
+            "summary": summary_info
+        }
+        
+        return JSONResponse(content=response_json)
+        
+    except Exception as e:
+        logger.error(f"Error in POST /analyze-compliance: {str(e)}", exc_info=True)
+        # Specific user friendly check for rate limit quota limits
+        err_msg = str(e)
+        if "quota" in err_msg.lower() or "429" in err_msg.lower():
+            friendly_msg = "Gemini API daily compliance analysis quota exceeded. Please configure an upgraded key or try again tomorrow."
+        else:
+            friendly_msg = "An unexpected error occurred during compliance document analysis. No details have been leaked."
+        return JSONResponse(status_code=500, content={"error": friendly_msg})
+
+@app.get("/download-report/{report_id}")
+def download_report(report_id: str):
+    """Download the pre-generated PDF report for the given report_id without invoking Gemini again"""
+    try:
+        # Sanitize report_id to avoid path traversal
+        sanitized_id = re.sub(r'[^a-zA-Z0-9\-]', '', report_id)
+        pdf_filename = os.path.join(tempfile.gettempdir(), f"report_{sanitized_id}.pdf")
+        if not os.path.exists(pdf_filename):
+            return JSONResponse(status_code=404, content={"error": "Report not found or has expired."})
+            
+        logger.info(f"📥 Streaming pre-generated report PDF: {pdf_filename}")
+        return FileResponse(
+            pdf_filename,
+            media_type="application/pdf",
+            filename=f"compliance_report_{sanitized_id[:8]}.pdf"
+        )
+    except Exception as e:
+        logger.error(f"Error in GET /download-report: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "Failed to stream the cached compliance report PDF."})
 
 if __name__ == "__main__":
     import uvicorn

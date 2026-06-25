@@ -1,284 +1,234 @@
-# FinReg - Financial Regulatory Compliance API
+# 🏛️ FinReg — AI-Powered Corporate Compliance Intelligence Platform
 
-A FastAPI-based system for regulatory compliance analysis and document processing.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.109.0-009688.svg?style=flat&logo=FastAPI)](https://fastapi.tiangolo.com)
+[![React](https://img.shields.io/badge/React-18.2.0-20232a.svg?style=flat&logo=React)](https://react.dev)
+[![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-3.4.1-38B2AC.svg?style=flat&logo=tailwind-css)](https://tailwindcss.com)
+[![ChromaDB](https://img.shields.io/badge/Vector_DB-Chroma-blue.svg?style=flat)](https://www.trychroma.com)
+
+FinReg is an enterprise-grade AI compliance platform designed to automate the auditing of corporate reports, board resolutions, and financial statements against the **Indian Companies Act, 2013** and MCA statutory rules.
+
+Leveraging semantic **Retrieval-Augmented Generation (RAG)**, local dense vector embeddings, and evidence-backed AI reasoning, FinReg turns hours of manual auditing into a one-click automated gap analysis.
+
+---
 
 ## 🏗️ Architecture
 
-- **FastAPI** - Modern web framework for APIs
-- **PostgreSQL** - Database for storing reports and documents  
-- **ChromaDB** - Vector database for regulatory document search
-- **Unstructured** - Document processing and text extraction
-- **ReportLab** - PDF report generation
+```mermaid
+graph TD
+    User([Compliance Officer]) -->|Upload PDF / Query| FE[Vite + React Frontend]
+    FE -->|API Requests| BE[FastAPI Backend]
+    
+    subgraph Backend Pipeline
+        BE -->|Lifespan Startup| DB_Conn[(PostgreSQL)]
+        BE -->|1. Validate & Sanitize| Val[PDF Validator]
+        Val -->|2. Extract Text| Ext[PyMuPDF Extractor]
+        Ext -->|3. Retrieve Regulations| RAG_Reg[ChromaDB Vector Store]
+        Ext -->|4. Match Evidence| Match_Comp[In-Memory Cosine Similarity]
+        RAG_Reg -->|BAAI/bge-small-en-v1.5| Embed[HuggingFace Embeddings]
+        Match_Comp -->|BAAI/bge-small-en-v1.5| Embed
+        
+        BE -->|5. Audit Evaluation| Gem[Gemini 2.5 Flash]
+        RAG_Reg -->|Official Rules Chunks| Gem
+        Match_Comp -->|Company Excerpts Chunks| Gem
+        Gem -->|6. JSON Payload| BE
+        BE -->|7. PDF Generator| PDF[ReportLab Engine]
+        PDF -->|Cached PDF| BE
+    end
+    
+    BE -->|JSON Response| FE
+    FE -->|Download Cache PDF| FE_Stream[File Download Stream]
+```
 
-## 📁 Project Structure
+---
+
+## ✨ Features
+
+*   **Unified compliance endpoint**: Consolidated pipeline combining text extraction, RAG matching, Gemini compliance evaluation, and PDF report creation.
+*   **Persistent ChromaDB vector search**: Indexes statutory laws utilizing HuggingFace's `BAAI/bge-small-en-v1.5` embeddings.
+*   **Evidence-backed AI auditor**: Compares company excerpts side-by-side with official legal clauses and generates compliance statuses (`Met`, `Partial`, `Gap`) and actionable remediations.
+*   **One-click professional PDF downloads**: Renders beautiful multi-page compliance roadmaps, gap matrices, and citations via ReportLab.
+*   **Context-sensitive empty states**: Adapts to dashboard filters to provide user-friendly success checkmarks and diagnostic guidance.
+*   **Lifespan resource preloading**: Pre-initializes AI models and vector databases at startup to avoid runtime request delays.
+*   **Production-grade security**: Limits uploads strictly to `<10MB` PDFs, sanitizes input filenames, and masks raw API exceptions or internal paths.
+
+---
+
+## 🛠️ Tech Stack
+
+*   **Backend**: Python, FastAPI, SQLAlchemy, PyMuPDF (fitz), LangChain
+*   **Frontend**: Vite, React, TypeScript, TailwindCSS, Radix UI, Lucide Icons
+*   **Database**: PostgreSQL (Metadata), ChromaDB (Vector database)
+*   **AI Engine**: Gemini 2.5 Flash, HuggingFace embeddings (`BAAI/bge-small-en-v1.5`)
+
+---
+
+## 📸 Screenshots
+
+*Placeholder: Place dashboard, upload wizard, and generated report PDF screenshots here.*
+
+---
+
+## 📁 Folder Structure
 
 ```
 FinReg/
 ├── backend/
-│   ├── main.py          # FastAPI application
-│   ├── models.py        # SQLAlchemy database models
-│   ├── database.py      # Database configuration
-│   └── ingestion.py     # Document ingestion pipeline
-├── requirements.txt     # Python dependencies
-├── docker-compose.yml   # Docker services configuration
-├── Dockerfile          # Container build instructions
-├── startup.py          # Application initialization script
-└── .env                # Environment configuration
+│   ├── main.py                     # FastAPI application & API endpoints
+│   ├── professional_enhanced_compliance.py # RAG matching and ReportLab generator
+│   ├── models.py                   # SQLAlchemy database models
+│   ├── database.py                 # PostgreSQL connection setup
+│   └── utils.py                    # PyMuPDF text extraction helpers
+├── finregFrontend/
+│   ├── src/
+│   │   ├── pages/
+│   │   │   ├── Dashboard.tsx       # Interactive Compliance Officer Dashboard
+│   │   │   └── Landing.tsx         # Enterprise Landing Page
+│   │   ├── App.tsx                 # Client routing configurations
+│   │   └── main.tsx                # Frontend entrypoint
+│   └── package.json                # Frontend package requirements
+├── regulations/                    # Official regulatory PDFs (e.g. Companies Act)
+├── tests/                          # Automated test cases
+│   ├── fixtures/                   # Test input documents (test_compliance.txt, etc.)
+│   ├── test_pdf_report.py          # Standalone PDF pipeline test
+│   ├── test_retrieval.py           # ChromaDB search checks
+│   └── test_api.py                 # HTTP API endpoints checks
+├── reports/                        # Cached generated compliance PDFs (Git ignored except .gitkeep)
+├── docs/                           # Project documentation
+├── ingest.py                       # Ingestion runner for ChromaDB population
+├── startup.py                      # Database initializer & server launcher
+├── .env.example                    # Environment template config
+└── .gitignore                      # Git ignore specifications
 ```
 
-## 🚀 Quick Start
+---
 
-### Prerequisites
+## 🔧 Environment Variables
 
-- Docker and Docker Compose
-- Python 3.11+ (for local development)
-
-### Running with Docker
-
-1. **Clone the repository**
-   ```bash
-   git clone <repository-url>
-   cd FinReg
-   ```
-
-2. **Create environment file**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your configuration
-   ```
-
-3. **Start the services**
-   ```bash
-   docker-compose up -d
-   ```
-
-4. **Check service health**
-   ```bash
-   curl http://localhost:8000/health
-   ```
-
-### Running Locally
-
-1. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. **Start PostgreSQL** (using Docker)
-   ```bash
-   docker-compose up db -d
-   ```
-
-3. **Run the application**
-   ```bash
-   python startup.py
-   ```
-
-## 🔧 API Endpoints
-
-### Core Endpoints
-
-- **GET /** - API status and information
-- **GET /health** - Health check with database status
-- **POST /generate-report/** - Generate compliance report from uploaded document
-
-### Generate Report
-
-Upload a document and receive a compliance analysis report:
+Configure these variables in a `.env` file at the project root:
 
 ```bash
-curl -X POST "http://localhost:8000/generate-report/" \
-     -H "accept: application/pdf" \
-     -H "Content-Type: multipart/form-data" \
-     -F "user_document=@your-policy-document.txt" \
-     -F "user_query=Analyze compliance gaps" \
-     --output compliance_report.pdf
-```
+# PostgreSQL Database connection
+DATABASE_URL=postgresql://finreg:finreg123@localhost:5432/finreg_db
 
-## 📊 Database Schema
-
-### ComplianceReport
-- `id` - Primary key
-- `filename` - Original document filename
-- `user_query` - Analysis query provided
-- `report_content` - Generated report text
-- `created_at` - Timestamp
-- `status` - Processing status
-
-### RegulatoryDocument
-- `id` - Primary key
-- `title` - Document title
-- `source_url` - Original source URL
-- `content` - Document text content
-- `document_type` - Regulatory agency (SEC, FDIC, CFPB)
-- `created_at` - Timestamp
-- `is_active` - Active status
-
-### UserDocument
-- `id` - Primary key
-- `original_filename` - Uploaded filename
-- `content` - Extracted text content
-- `file_type` - Document type
-- `uploaded_at` - Timestamp
-- `processed` - Processing status
-
-## 🔍 Features
-
-### Document Processing
-- Supports multiple file formats (text, PDF, Word, etc.)
-- Automatic text extraction using Unstructured library
-- Fallback processing for unsupported formats
-
-### Compliance Analysis
-- Mock regulatory analysis against SEC, FDIC, and CFPB requirements
-- Structured compliance reporting
-- PDF report generation with professional formatting
-
-### Vector Search (Planned)
-- ChromaDB integration for semantic document search
-- Ollama embeddings for local processing
-- RAG pipeline for regulatory document retrieval
-
-## 🛠️ Development
-
-### Local Development Setup
-
-1. **Set up virtual environment**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # Linux/Mac
-   # or
-   venv\Scripts\activate     # Windows
-   ```
-
-2. **Install development dependencies**
-   ```bash
-   pip install -r requirements.txt
-   pip install pytest black isort mypy
-   ```
-
-3. **Run tests**
-   ```bash
-   pytest
-   ```
-
-4. **Format code**
-   ```bash
-   black backend/
-   isort backend/
-   ```
-
-### Docker Development
-
-**Rebuild and restart:**
-```bash
-docker-compose up --build -d
-```
-
-**View logs:**
-```bash
-docker-compose logs -f api
-```
-
-**Access database:**
-```bash
-docker-compose exec db psql -U finreg -d finreg_db
-```
-
-## 🔧 Configuration
-
-### Environment Variables (.env)
-
-```env
-# Database
-DATABASE_URL=postgresql://finreg:finreg123@db:5432/finreg_db
-
-# API
+# Server listener config
 API_HOST=0.0.0.0
 API_PORT=8000
 DEBUG=False
 
-# Application
-APP_NAME=FinReg API
-VERSION=2.0.0
+# API Key (Required for compliance RAG evaluation)
+GEMINI_API_KEY=your_gemini_api_key_here
+
+# Frontend connection URL
+VITE_API_BASE_URL=http://localhost:8000
 ```
 
-### Docker Compose Profiles
+---
 
-**Standard services:**
-```bash
-docker-compose up -d
-```
+## 🚀 Installation & Local Development
 
-**Include pgAdmin:**
-```bash
-docker-compose --profile admin up -d
-```
+### Prerequisites
+*   Python 3.11+
+*   Node.js 18+
+*   PostgreSQL
 
-## 📝 API Documentation
+### 1. Database Setup
+Make sure your PostgreSQL server is active and the database name match `DATABASE_URL`.
 
-Once running, visit:
-- **Interactive API Docs:** http://localhost:8000/docs
-- **ReDoc:** http://localhost:8000/redoc
+### 2. Backend Installation & Run
+1. Create and activate a Python virtual environment:
+   ```bash
+   python -m venv venv
+   # Windows:
+   venv\Scripts\activate
+   # macOS/Linux:
+   source venv/bin/activate
+   ```
+2. Install Python dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Build the persistent Vector Database:
+   ```bash
+   python ingest.py
+   ```
+   *Note: This parses the legal files inside `regulations/`, chunks them, computes embeddings, and populates `chroma_db/` locally.*
+4. Start the FastAPI server:
+   ```bash
+   python startup.py
+   ```
+   The API will listen at `http://localhost:8000`. Access docs at `http://localhost:8000/docs`.
 
-## 🔍 Monitoring
+### 3. Frontend Installation & Run
+1. Navigate to the frontend directory:
+   ```bash
+   cd finregFrontend
+   ```
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+3. Start the local dev server:
+   ```bash
+   npm run dev
+   ```
+   The frontend app will launch at `http://localhost:8080`.
 
-### Health Checks
-- Application: http://localhost:8000/health
-- Database connectivity check included
-- Docker health check configured
+---
 
-### Database Administration
-- pgAdmin: http://localhost:5050 (with admin profile)
-  - Email: admin@finreg.local  
-  - Password: admin123
+## ⚡ API Endpoints
 
-## 🚨 Troubleshooting
+### `POST /analyze-compliance`
+Audits the uploaded PDF against the Companies Act framework and returns compliance findings.
+*   **Body**: `multipart/form-data`
+*   **Fields**: `user_document` (File)
+*   **Response**:
+    ```json
+    {
+      "report_id": "8e3d64ba-...",
+      "overall_score": 85.0,
+      "overall_risk": "Low",
+      "findings": [
+        {
+          "requirement_code": "SECTION_134",
+          "regulation_name": "Preparation of Financial Statements",
+          "status": "Fully Compliant",
+          "risk_level": "Low",
+          "confidence_score": 95.0,
+          "gap_summary": "No significant gaps identified.",
+          "reasoning": "...",
+          "evidence_company": "...",
+          "evidence_regulation": "...",
+          "source_citations": "Section 134, Companies Act, 2013",
+          "page_numbers": "p. 312 of compliance rules pdf.pdf"
+        }
+      ],
+      "summary": {
+        "compliant_count": 7,
+        "partially_compliant_count": 1,
+        "non_compliant_count": 0,
+        "total_count": 8,
+        "average_confidence": 92.5,
+        "executive_summary": "..."
+      }
+    }
+    ```
 
-### Common Issues
+### `GET /download-report/{report_id}`
+Streams the pre-generated compliance report PDF from cache.
+*   **Parameters**: `report_id` (UUID string)
+*   **Response**: `application/pdf` (File download stream)
 
-**Database connection failed:**
-```bash
-docker-compose logs db
-# Check if PostgreSQL is running and accepting connections
-```
+---
 
-**Document processing errors:**
-```bash
-# Ensure unstructured library is properly installed
-pip install "unstructured[local-inference]"
-```
+## 🔮 Future Improvements
 
-**Port already in use:**
-```bash
-# Change ports in docker-compose.yml or stop conflicting services
-docker-compose down
-lsof -ti:8000 | xargs kill -9
-```
+1.  **Distributed Vector Store**: Migrate from local disk-based Chroma storage to a remote vector database cluster (e.g. pgvector or remote Chroma DB server) for horizontally scaled API servers.
+2.  **Cache PDF Cleanup Daemon**: Integrate a task runner or background cron job to automatically clean up temporary generated PDF reports older than 24 hours.
+3.  **Advanced LLM Reranking**: Apply Cross-Encoder reranking to retrieved chunks to improve query precision prior to LLM submission.
 
-### Reset Everything
-
-```bash
-docker-compose down -v
-docker system prune -f
-docker-compose up --build -d
-```
+---
 
 ## 📄 License
 
-This project is licensed under the MIT License.
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## 📞 Support
-
-For questions or issues:
-- Check the [troubleshooting section](#-troubleshooting)
-- Open an issue on GitHub
-- Review API documentation at `/docs`
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

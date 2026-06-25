@@ -12,10 +12,9 @@ import re
 try:
     from langchain_community.document_loaders import WebBaseLoader
     from langchain_community.vectorstores import Chroma
-    from langchain_community.embeddings import OllamaEmbeddings
+    from langchain_community.embeddings import HuggingFaceEmbeddings
     from langchain.schema import Document
     from langchain.text_splitter import RecursiveCharacterTextSplitter
-    from langchain_ollama import OllamaLLM  # For text processing
     LANGCHAIN_IMPORTS_OK = True
 except ImportError as e:
     print(f"Warning: Some langchain components not available: {e}")
@@ -37,12 +36,6 @@ class RegulatoryTextProcessor:
     
     def __init__(self, model_name: str = "llama3"):
         self.llm = None
-        if LANGCHAIN_IMPORTS_OK:
-            try:
-                self.llm = OllamaLLM(model=model_name)
-                print(f"✅ Initialized LLM processor with model: {model_name}")
-            except Exception as e:
-                print(f"⚠️ Could not initialize LLM: {e}")
         
         # Indian regulatory citation patterns
         self.citation_patterns = [
@@ -335,8 +328,12 @@ def get_enhanced_vector_store():
         processed_regulations = ingestion.process_all_regulations()
         enhanced_mappings = ingestion.create_enhanced_mappings(processed_regulations)
         
-        # Initialize vector store with enhanced Ollama embeddings
-        embeddings = OllamaEmbeddings(model="nomic-embed-text")
+        # Initialize vector store with local embeddings
+        embeddings = HuggingFaceEmbeddings(
+            model_name="BAAI/bge-small-en-v1.5",
+            model_kwargs={'device': 'cpu'},
+            encode_kwargs={'normalize_embeddings': True}
+        )
         vector_store = Chroma(embedding_function=embeddings, persist_directory="./chroma_db")
         
         # Check if we need to populate the vector store

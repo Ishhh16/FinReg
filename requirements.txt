@@ -9,15 +9,20 @@ python-dotenv==1.0.0
 
 # File handling
 python-multipart==0.0.6
-unstructured[local-inference]==0.10.30
+# unstructured[local-inference]==0.10.30 (commented to avoid onnxruntime conflicts with chromadb)
 
 # PDF generation
 reportlab==4.0.7
 
 # Vector database for semantic analysis
-chromadb==0.4.18
+chromadb>=0.5.3
 numpy<2.0.0
 
 # Basic utilities
 requests==2.31.0
 beautifulsoup4==4.12.2
+
+# Generative AI & Embeddings
+google-generativeai
+sentence-transformers
+

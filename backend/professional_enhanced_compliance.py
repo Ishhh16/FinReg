@@ -8,11 +8,25 @@ import re
 import json
 import html
 from datetime import datetime
+from dotenv import load_dotenv
+from pathlib import Path
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 from typing import List, Dict, Any, Tuple, Optional
+from pydantic import BaseModel, Field
 from io import BytesIO
 import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
+import logging
+
+logger = logging.getLogger("finreg_backend")
+
+# RAG and embeddings imports
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+import numpy as np
 
 # PDF generation imports
 from reportlab.lib.pagesizes import A4
@@ -56,11 +70,21 @@ def clean_text_for_pdf(text: str) -> str:
     # Escape HTML entities properly
     text = html.escape(text, quote=False)
     
-    # Limit length to prevent extremely long text
-    if len(text) > 500:
-        text = text[:497] + "..."
-    
     return text
+
+
+class ComplianceFinding(BaseModel):
+    requirement_code: str = Field(description="The unique code of the compliance requirement (e.g. SECTION_92, SECTION_134)")
+    regulation_name: str = Field(description="The name of the regulation / legal citation (e.g. Section 92, Companies Act, 2013)")
+    status: str = Field(description="The compliance status: Compliant, Partially Compliant, or Non-Compliant")
+    reasoning: str = Field(description="Detailed explanation comparing the company text against the official regulation rules")
+    evidence_company: str = Field(description="Verbatim exact quote(s) from the company document showing compliance or gaps")
+    evidence_regulation: str = Field(description="Verbatim exact quote(s) from the retrieved official regulation chunks")
+    remediation: str = Field(description="Clear, actionable remediation steps if not fully compliant. Empty list/text if fully compliant.")
+    confidence_score: float = Field(description="A confidence score for this compliance assessment between 0.0 and 1.0")
+
+class ComplianceReportSchema(BaseModel):
+    findings: List[ComplianceFinding]
 
 
 class ComplianceStatus(Enum):
@@ -128,11 +152,40 @@ class DetailedComplianceItem:
     next_due_date: Optional[str] = None
 
 
+_embeddings_instance = None
+_vector_store_instance = None
+
+def get_shared_embeddings():
+    global _embeddings_instance
+    if _embeddings_instance is None:
+        logger.info("🧬 Loading embeddings model in analyzer: BAAI/bge-small-en-v1.5...")
+        _embeddings_instance = HuggingFaceEmbeddings(
+            model_name="BAAI/bge-small-en-v1.5",
+            model_kwargs={'device': 'cpu'},
+            encode_kwargs={'normalize_embeddings': True}
+        )
+    return _embeddings_instance
+
+def get_shared_vector_store():
+    global _vector_store_instance
+    if _vector_store_instance is None:
+        emb = get_shared_embeddings()
+        logger.info("📁 Loading persistent regulations Chroma DB...")
+        _vector_store_instance = Chroma(
+            collection_name="regulations_knowledge_base",
+            embedding_function=emb,
+            persist_directory="./chroma_db"
+        )
+        logger.info("✅ Regulations vector store loaded in analyzer.")
+    return _vector_store_instance
+
 class ProfessionalEnhancedComplianceAnalyzer:
     """Professional compliance analyzer with comprehensive reporting capabilities"""
     
     def __init__(self):
         self.compliance_framework = self._load_comprehensive_framework()
+        self.embeddings = get_shared_embeddings()
+        self.vector_store = get_shared_vector_store()
         
     def _load_comprehensive_framework(self) -> Dict[str, DetailedComplianceItem]:
         """Load comprehensive Indian Companies Act compliance framework"""
@@ -316,105 +369,312 @@ class ProfessionalEnhancedComplianceAnalyzer:
         
         return framework
     
-    def analyze_document(self, text_content: str, company_name: str = "Company") -> Dict[str, Any]:
-        """Perform comprehensive compliance analysis"""
+    def retrieve_compliance_context(self, document_text: str) -> Dict[str, Any]:
+        """
+        Retrieves relevant regulation chunks (from persistent ChromaDB) and
+        company document chunks (via in-memory embeddings and similarity)
+        for each compliance requirement in the framework.
         
-        analysis_results = []
-        text_lower = text_content.lower()
+        Does NOT call Gemini or modify compliance scoring.
+        """
+        logger.info(f"📊 Running retrieval context matching on uploaded document ({len(document_text)} characters)...")
         
-        # Define enhanced keyword patterns for each section
-        enhanced_patterns = {
-            "SECTION_134": {
-                "primary": ["financial statement", "balance sheet", "profit and loss", "cash flow", "income statement", "statement of financial position"],
-                "secondary": ["audited", "financial report", "accounts", "accounting standard", "schedule iii", "board approval"],
-                "evidence_indicators": ["prepared", "adopted", "approved", "certified", "auditor", "notes to accounts"]
-            },
-            "SECTION_139": {
-                "primary": ["auditor", "audit", "chartered accountant", "statutory audit"],
-                "secondary": ["appointment", "rotation", "remuneration", "independence", "adt-1"],
-                "evidence_indicators": ["appointed", "consent", "eligible", "qualified", "certified"]
-            },
-            "SECTION_92": {
-                "primary": ["annual return", "mgt-7", "form mgt", "return filing"],
-                "secondary": ["roc", "registrar", "shareholding", "particulars", "filing"],
-                "evidence_indicators": ["filed", "submitted", "uploaded", "registered", "acknowledged"]
-            },
-            "SECTION_96": {
-                "primary": ["annual general meeting", "agm", "shareholders meeting"],
-                "secondary": ["notice", "quorum", "resolution", "minutes", "attendance"],
-                "evidence_indicators": ["held", "conducted", "convened", "attended", "resolved"]
-            },
-            "SECTION_137": {
-                "primary": ["aoc-4", "filing financial statements", "roc filing"],
-                "secondary": ["financial statements filed", "board report", "auditor report", "adoption"],
-                "evidence_indicators": ["filed", "submitted", "adopted", "attached", "uploaded"]
-            },
-            "SECTION_203": {
-                "primary": ["key managerial personnel", "kmp", "managing director", "ceo", "cfo", "company secretary"],
-                "secondary": ["whole-time", "appointment", "designation", "management"],
-                "evidence_indicators": ["appointed", "designated", "acting", "resigned", "contract"]
-            },
-            "SECTION_149": {
-                "primary": ["independent director", "board composition", "non-executive"],
-                "secondary": ["independence", "declaration", "nomination", "board diversity"],
-                "evidence_indicators": ["appointed", "independent", "declared", "confirmed", "evaluated"]
-            },
-            "SECTION_184": {
-                "primary": ["disclosure of interest", "conflict of interest", "related party"],
-                "secondary": ["director interest", "contracts", "arrangements", "transactions"],
-                "evidence_indicators": ["disclosed", "declared", "register", "recorded", "abstained"]
+        # 1. Chunk the uploaded company document in memory
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            length_function=len
+        )
+        company_chunks = text_splitter.split_text(document_text)
+        logger.info(f"🧩 Segmented company document into {len(company_chunks)} chunks.")
+        
+        # 2. Compute embeddings for company chunks in-memory
+        company_embeddings = []
+        if company_chunks:
+            # Batch embedding computation
+            company_embeddings = self.embeddings.embed_documents(company_chunks)
+            logger.info("🧬 In-memory embeddings computed for company chunks.")
+            
+        retrieval_results = {}
+        
+        # 3. For each requirement, retrieve regulation chunks and company chunks
+        for req_code, item in self.compliance_framework.items():
+            logger.info(f"🔍 Retrieving context for requirement: {req_code}")
+            
+            # Formulate query using code, title, and description
+            query_str = f"{item.legal_citation} {item.section_title} {item.requirement_description}"
+            
+            # A. Retrieve regulation chunks from persistent ChromaDB
+            reg_matches = []
+            try:
+                # Retrieve top 3 matching chunks
+                reg_results = self.vector_store.similarity_search_with_score(query_str, k=3)
+                for doc, score in reg_results:
+                    l2_dist = float(score)
+                    cos_sim = 1.0 - (l2_dist / 2.0)
+                    reg_matches.append({
+                        "text": doc.page_content.strip(),
+                        "score": round(cos_sim, 4),
+                        "page_number": doc.metadata.get("page_number", "Unknown"),
+                        "source_filename": doc.metadata.get("source_filename", "compliance rules pdf.pdf"),
+                        "chunk_id": doc.metadata.get("chunk_id", "Unknown")
+                    })
+            except Exception as e:
+                logger.error(f"⚠️ Error retrieving regulations for {req_code}: {e}")
+                
+            # B. Retrieve relevant company document chunks in memory using cosine similarity
+            company_matches = []
+            if company_chunks and company_embeddings:
+                try:
+                    # Embed the query
+                    query_emb = self.embeddings.embed_query(query_str)
+                    query_vec = np.array(query_emb)
+                    
+                    scores = []
+                    for i, chunk_emb in enumerate(company_embeddings):
+                        chunk_vec = np.array(chunk_emb)
+                        # Cosine similarity (dot product of normalized unit vectors)
+                        similarity = float(np.dot(query_vec, chunk_vec))
+                        scores.append((similarity, i))
+                        
+                    # Sort by similarity descending
+                    scores.sort(reverse=True, key=lambda x: x[0])
+                    
+                    # Get top 3
+                    for sim, idx in scores[:3]:
+                        company_matches.append({
+                            "text": company_chunks[idx].strip(),
+                            "score": round(sim, 4),
+                            "chunk_index": idx
+                        })
+                except Exception as e:
+                    logger.error(f"⚠️ Error retrieving company chunks for {req_code}: {e}")
+                    
+            # Store in results mapping
+            retrieval_results[req_code] = {
+                "requirement_code": req_code,
+                "citation": item.legal_citation,
+                "title": item.section_title,
+                "regulation_chunks": reg_matches,
+                "company_chunks": company_matches
             }
+            
+        return retrieval_results
+
+    def analyze_document(self, text_content: str, company_name: str = "Company") -> Dict[str, Any]:
+        """Perform comprehensive compliance analysis using RAG and Gemini 2.5 Flash"""
+        # 1. Retrieve the context mapping for all requirements using the existing RAG retrieval method
+        retrieval_results = self.retrieve_compliance_context(text_content)
+        
+        # 2. Build the combined prompt context
+        context_str = ""
+        for req_code, req_data in retrieval_results.items():
+            context_str += f"=== REQUIREMENT: {req_code} ===\n"
+            context_str += f"Title: {req_data['title']}\n"
+            context_str += f"Legal Citation: {req_data['citation']}\n"
+            
+            context_str += "\n--- RETRIEVED REGULATIONS (OFFICIAL RULES) ---\n"
+            reg_chunks = req_data.get("regulation_chunks", [])
+            if reg_chunks:
+                for idx, r in enumerate(reg_chunks):
+                    context_str += f"[{idx+1}] (Page {r['page_number']}, Source: {r['source_filename']}): {r['text']}\n"
+            else:
+                context_str += "[No official regulation chunks retrieved]\n"
+                
+            context_str += "\n--- RETRIEVED COMPANY DOCUMENT EXCERPTS ---\n"
+            company_chunks = req_data.get("company_chunks", [])
+            if company_chunks:
+                for idx, c in enumerate(company_chunks):
+                    context_str += f"[{idx+1}] (Relevance Score: {c['score']}): {c['text']}\n"
+            else:
+                context_str += "[No matching company document excerpts found in the uploaded text]\n"
+            context_str += "\n=========================================\n\n"
+
+        prompt = f"""You are a professional financial compliance auditor specializing in the Indian Companies Act, 2013.
+Your task is to analyze the compliance of the uploaded company document excerpts against the retrieved official regulations.
+
+For each compliance requirement:
+1. Compare the company excerpts (evidence of compliance) against the retrieved regulation rules.
+2. Determine the status:
+   - "Compliant": If the company document contains clear evidence meeting all the regulation requirements.
+   - "Partially Compliant": If some evidence is found but it fails to show complete implementation or misses key legal details.
+   - "Non-Compliant": If the company document fails to address the requirement, or indicates a direct breach.
+3. Extract exact verbatim quotes from both the company excerpts and the regulation chunks as supporting evidence.
+4. If the status is not "Compliant", provide actionable remediation instructions.
+
+Evaluate all of the following requirements at once. Rely ONLY on the provided contexts. Do not hallucinate or assume compliance if no evidence is found in the excerpts.
+
+Here is the context data:
+{context_str}
+
+Please generate the report list of findings in the exact JSON schema requested.
+"""
+        
+        # 3. Call Gemini API
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY environment variable is not set!")
+
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        
+        generation_config = {
+            "response_mime_type": "application/json",
+            "response_schema": ComplianceReportSchema
         }
         
-        # Analyze each compliance requirement
+        logger.info("⏳ Invoking Gemini 2.5 Flash API for compliance analysis (Single Call)...")
+        try:
+            response = model.generate_content(prompt, generation_config=generation_config)
+            raw_output = response.text
+            try:
+                findings_json = json.loads(raw_output)
+                logger.info("✅ Gemini successfully returned valid JSON matching the schema.")
+            except json.JSONDecodeError as je:
+                logger.warning(f"⚠️ Warning: Gemini returned invalid JSON. Error: {je}")
+                logger.info("🧹 Attempting automatic JSON repair/retry prompt...")
+                
+                repair_prompt = f"""The previous response returned invalid JSON which failed parsing:
+Error: {je}
+Response received:
+```json
+{raw_output}
+```
+
+Please fix the formatting, ensuring it is 100% valid JSON and conforms strictly to the schema description:
+- The top-level key must be "findings" (a list of objects).
+- Each finding object must contain: requirement_code, regulation_name, status, reasoning, evidence_company, evidence_regulation, remediation, confidence_score.
+"""
+                repair_response = model.generate_content(repair_prompt, generation_config=generation_config)
+                findings_json = json.loads(repair_response.text)
+                logger.info("🎉 Repair successful! Cleaned JSON parsed successfully on retry.")
+        except Exception as e:
+            raise RuntimeError(f"Gemini compliance analysis call failed: {e}")
+
+        # 4. Map the Gemini findings JSON into DetailedComplianceItem objects in the framework
+        findings = findings_json.get("findings", [])
+        findings_map = {f.get("requirement_code"): f for f in findings if f.get("requirement_code")}
+        
+        analysis_results = []
         for section_code, item in self.compliance_framework.items():
-            patterns = enhanced_patterns.get(section_code, {"primary": [], "secondary": [], "evidence_indicators": []})
-            
-            # Calculate compliance score and find evidence
-            primary_matches = sum(1 for pattern in patterns["primary"] if pattern in text_lower)
-            secondary_matches = sum(1 for pattern in patterns["secondary"] if pattern in text_lower)
-            evidence_matches = sum(1 for pattern in patterns["evidence_indicators"] if pattern in text_lower)
-            
-            total_primary = len(patterns["primary"])
-            total_secondary = len(patterns["secondary"]) 
-            total_evidence = len(patterns["evidence_indicators"])
-            
-            # Calculate weighted score
-            primary_score = (primary_matches / max(total_primary, 1)) * 0.5
-            secondary_score = (secondary_matches / max(total_secondary, 1)) * 0.3  
-            evidence_score = (evidence_matches / max(total_evidence, 1)) * 0.2
-            
-            final_score = (primary_score + secondary_score + evidence_score) * 100
-            
-            # Extract evidence
-            evidence_found = self._extract_detailed_evidence(text_content, patterns, section_code)
-            
-            # Determine compliance status and risk level
-            compliance_status, risk_level = self._determine_compliance_status(final_score, len(evidence_found))
-            
-            # Generate detailed rationale
-            rationale = self._generate_compliance_rationale(
-                section_code, final_score, primary_matches, secondary_matches, 
-                evidence_matches, len(evidence_found)
-            )
-            
-            # Generate gap analysis
-            gap_analysis = self._generate_gap_analysis(section_code, compliance_status, evidence_found)
-            
-            # Generate recommendations
-            recommendations = self._generate_recommendations(section_code, compliance_status, risk_level)
-            
-            # Update the item with analysis results
-            item.compliance_score = round(final_score, 2)
-            item.compliance_status = compliance_status
-            item.risk_level = risk_level
-            item.evidence_found = evidence_found
-            item.compliance_rationale = rationale
-            item.gap_analysis = gap_analysis
-            item.recommendations = recommendations
+            finding = findings_map.get(section_code)
+            if finding:
+                # Status mapping
+                status_str = finding.get("status", "Non-Compliant")
+                if status_str == "Compliant":
+                    compliance_status = ComplianceStatus.FULLY_COMPLIANT
+                    risk_level = RiskLevel.LOW
+                elif status_str == "Partially Compliant":
+                    compliance_status = ComplianceStatus.PARTIALLY_COMPLIANT
+                    risk_level = RiskLevel.MEDIUM
+                else:
+                    compliance_status = ComplianceStatus.NON_COMPLIANT
+                    risk_level = RiskLevel.HIGH
+                
+                # Confidence score mapping
+                confidence_score = float(finding.get("confidence_score", 0.0))
+                compliance_score = confidence_score * 100.0
+                
+                # Reasoning and Quotes mapping
+                reasoning = finding.get("reasoning", "")
+                evidence_company = finding.get("evidence_company", "")
+                evidence_regulation = finding.get("evidence_regulation", "")
+                
+                # Retrieve matching page references from regulations context
+                req_data = retrieval_results.get(section_code, {})
+                reg_chunks = req_data.get("regulation_chunks", [])
+                
+                page_refs = []
+                for r in reg_chunks:
+                    page_no = r.get("page_number", "Unknown")
+                    src = r.get("source_filename", "compliance rules pdf.pdf")
+                    page_refs.append(f"p. {page_no} of {src}")
+                
+                page_reference_str = ", ".join(page_refs) if page_refs else "Regulations PDF"
+                
+                evidence_list = []
+                if evidence_company:
+                    clean_company = clean_text_for_pdf(evidence_company)
+                    evidence_list.append(ComplianceEvidence(
+                        text_snippet=clean_company,
+                        section_reference="Company Document",
+                        confidence_score=confidence_score,
+                        relevance_explanation="Verbatim company document evidence"
+                    ))
+                if evidence_regulation:
+                    clean_reg = clean_text_for_pdf(evidence_regulation)
+                    evidence_list.append(ComplianceEvidence(
+                        text_snippet=clean_reg,
+                        section_reference=f"Regulation: {page_reference_str}",
+                        confidence_score=confidence_score,
+                        relevance_explanation="Verbatim regulation rule reference"
+                    ))
+                
+                # Remediation mapping
+                remediation_str = finding.get("remediation", "")
+                recommendations_list = []
+                if remediation_str:
+                    recommendations_list.append(ComplianceRecommendation(
+                        priority="Immediate" if risk_level == RiskLevel.HIGH else "Medium",
+                        action_required=clean_text_for_pdf(remediation_str),
+                        responsible_party="Compliance Officer / Management",
+                        timeline="Immediate" if risk_level == RiskLevel.HIGH else "60 days",
+                        resources_needed=["Internal Audit", "Legal Council"],
+                        regulatory_reference=item.legal_citation
+                    ))
+                else:
+                    recommendations_list.append(ComplianceRecommendation(
+                        priority="Low",
+                        action_required="Continue monitoring and maintain current compliance standards",
+                        responsible_party="Compliance Officer",
+                        timeline="Ongoing",
+                        resources_needed=["Regular monitoring procedures"],
+                        regulatory_reference=section_code
+                    ))
+                
+                # Populate DetailedComplianceItem fields
+                item.compliance_status = compliance_status
+                item.risk_level = risk_level
+                item.compliance_score = round(compliance_score, 2)
+                item.evidence_found = evidence_list
+                item.compliance_rationale = reasoning
+                item.gap_analysis = reasoning if compliance_status != ComplianceStatus.FULLY_COMPLIANT else "No significant gaps identified."
+                item.recommendations = recommendations_list
+                
+                # Attach RAG metadata for PDF transparency display
+                company_chunks = req_data.get("company_chunks", [])
+                scores = [r.get("score", 1.0) for r in reg_chunks] + [c.get("score", 1.0) for c in company_chunks]
+                avg_score = sum(scores) / len(scores) if scores else 0.0
+                item.rag_metadata = {
+                    "sources_retrieved": list(set([r.get("source_filename", "compliance rules pdf.pdf") for r in reg_chunks])),
+                    "chunks_used": len(reg_chunks) + len(company_chunks),
+                    "avg_similarity_score": round(avg_score, 4),
+                    "embedding_model": "BAAI/bge-small-en-v1.5",
+                    "retrieval_method": "Semantic Vector Search",
+                    "reranking_status": "None (Cosine Similarity Match)",
+                    "regulation_chunks": reg_chunks,
+                    "company_chunks": company_chunks
+                }
+                
+            else:
+                # Fallback if requirement wasn't returned by Gemini
+                item.compliance_status = ComplianceStatus.NON_COMPLIANT
+                item.risk_level = RiskLevel.CRITICAL
+                item.compliance_score = 0.0
+                item.compliance_rationale = "Requirement not assessed by evaluation model."
+                item.gap_analysis = "Missing evaluation context."
+                item.recommendations = [ComplianceRecommendation(
+                    priority="Critical",
+                    action_required="Manually review this requirement against regulatory texts.",
+                    responsible_party="Compliance Officer",
+                    timeline="Immediate",
+                    resources_needed=["Manual Audit"]
+                )]
             
             analysis_results.append(item)
-        
+            
         # Calculate overall metrics
         overall_metrics = self._calculate_overall_metrics(analysis_results)
         
@@ -703,8 +963,8 @@ class ProfessionalEnhancedComplianceAnalyzer:
         
         # Add priority recommendations
         critical_items = [item for item in analysis_results if item.risk_level == RiskLevel.CRITICAL]
-        for item in critical_items[:3]:  # Top 3 critical items
-            summary_parts.append(f"• {item.section_title}: {item.gap_analysis[:100]}...")
+        for item in critical_items:  # Print all critical items without clipping
+            summary_parts.append(f"• {item.section_title}: {item.gap_analysis}")
         
         if metrics['overall_compliance_score'] >= 80:
             summary_parts.append("\nOVERALL ASSESSMENT: Strong compliance framework with minor areas for improvement.")
@@ -768,11 +1028,12 @@ class ProfessionalEnhancedComplianceAnalyzer:
 
 def create_professional_compliance_report(text_content: str, company_name: str = "Company") -> bytes:
     """Create professional, comprehensive compliance report PDF"""
-    
-    # Perform analysis
     analyzer = ProfessionalEnhancedComplianceAnalyzer()
     analysis_data = analyzer.analyze_document(text_content, company_name)
-    
+    return generate_pdf_report_from_data(analysis_data, company_name)
+
+def generate_pdf_report_from_data(analysis_data: Dict[str, Any], company_name: str = "Company") -> bytes:
+    """Generate PDF report directly from pre-computed analysis data"""
     # Create PDF
     buffer = BytesIO()
     doc = SimpleDocTemplate(
@@ -887,99 +1148,66 @@ def create_professional_compliance_report(text_content: str, company_name: str =
     story.append(PageBreak())
     
     # Executive Summary
-    story.append(Paragraph("Executive Summary", section_style))
-    story.append(Paragraph(clean_text_for_pdf(analysis_data['executive_summary']), styles['Normal']))
-    story.append(Spacer(1, 20))
-    
-    # Overall Metrics Dashboard
-    story.append(Paragraph("Compliance Dashboard", subsection_style))
-    
-    metrics = analysis_data['overall_metrics']
-    
-    # Overall Score Card
-    score_color = HexColor('#38a169') if metrics['overall_compliance_score'] >= 80 else \
-                  HexColor('#d69e2e') if metrics['overall_compliance_score'] >= 60 else \
-                  HexColor('#dd6b20') if metrics['overall_compliance_score'] >= 40 else \
-                  HexColor('#e53e3e')
-    
-    score_data = [
-        ["OVERALL COMPLIANCE SCORE", f"{metrics['overall_compliance_score']}%"]
-    ]
-    
-    score_table = Table(score_data, colWidths=[8*cm, 4*cm])
-    score_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), score_color),
-        ('TEXTCOLOR', (0, 0), (-1, -1), white),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, -1), 16),
-        ('TOPPADDING', (0, 0), (-1, -1), 15),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 15)
-    ]))
-    
-    story.append(score_table)
+    story.append(Paragraph("1. Executive Summary", section_style))
+    exec_summary_html = clean_text_for_pdf(analysis_data['executive_summary']).replace('\n', '<br/>')
+    story.append(Paragraph(exec_summary_html, styles['Normal']))
     story.append(Spacer(1, 15))
     
-    # Compliance Distribution
-    compliance_data = [
-        ["Status", "Count", "Percentage", "Description"],
-        ["Fully Compliant", str(metrics['compliance_distribution']['fully_compliant']), 
-         f"{metrics['compliance_percentage']['fully_compliant']}%", "Meeting all requirements"],
-        ["Partially Compliant", str(metrics['compliance_distribution']['partially_compliant']), 
-         f"{metrics['compliance_percentage']['partially_compliant']}%", "Some gaps identified"],
-        ["Non-Compliant", str(metrics['compliance_distribution']['non_compliant']), 
-         f"{metrics['compliance_percentage']['non_compliant']}%", "Significant deficiencies"]
-    ]
-    
-    compliance_table = Table(compliance_data, colWidths=[4*cm, 2*cm, 2*cm, 6*cm])
-    compliance_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), HexColor('#2c5282')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), white),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 11),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('GRID', (0, 0), (-1, -1), 1, HexColor('#e2e8f0')),
-        ('BACKGROUND', (0, 1), (-1, 1), HexColor('#c6f6d5')),
-        ('BACKGROUND', (0, 2), (-1, 2), HexColor('#fef5e7')),
-        ('BACKGROUND', (0, 3), (-1, 3), HexColor('#fed7d7')),
-        ('TOPPADDING', (0, 0), (-1, -1), 8),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 8)
-    ]))
-    
-    story.append(compliance_table)
+    # Key Findings bullet section
+    story.append(Paragraph("Key Findings Summary", subsection_style))
+    for item in analysis_data['detailed_analysis']:
+        status_icon = "🟢" if item.compliance_status == ComplianceStatus.FULLY_COMPLIANT else "🟡" if item.compliance_status == ComplianceStatus.PARTIALLY_COMPLIANT else "🔴"
+        finding_text = f"• <b>{item.section_code} - {item.section_title}:</b> {status_icon} {item.compliance_status.value} (Confidence: {item.compliance_score:.1f}%)<br/><i>Quick Summary:</i> {item.compliance_rationale.split('.')[0]}."
+        story.append(Paragraph(finding_text, styles['Normal']))
+        story.append(Spacer(1, 4))
     story.append(Spacer(1, 15))
     
-    # Risk Distribution
-    risk_data = [
-        ["Risk Level", "Count", "Priority", "Action Required"],
-        ["Critical", str(metrics['risk_distribution']['critical']), "Immediate", "Urgent remediation"],
-        ["High", str(metrics['risk_distribution']['high']), "Within 30 days", "Prompt action needed"],
-        ["Medium", str(metrics['risk_distribution']['medium']), "Within 60 days", "Monitor and improve"],
-        ["Low", str(metrics['risk_distribution']['low']), "Ongoing", "Maintain standards"]
-    ]
-    
-    risk_table = Table(risk_data, colWidths=[3*cm, 2*cm, 3*cm, 6*cm])
-    risk_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), HexColor('#744210')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), white),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 11),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('GRID', (0, 0), (-1, -1), 1, HexColor('#e2e8f0')),
-        ('BACKGROUND', (0, 1), (-1, 1), HexColor('#fed7d7')),
-        ('BACKGROUND', (0, 2), (-1, 2), HexColor('#feebc8')),
-        ('BACKGROUND', (0, 3), (-1, 3), HexColor('#fef5e7')),
-        ('BACKGROUND', (0, 4), (-1, 4), HexColor('#c6f6d5')),
-        ('TOPPADDING', (0, 0), (-1, -1), 8),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 8)
-    ]))
-    
-    story.append(risk_table)
     story.append(PageBreak())
     
     # Detailed Section Analysis
-    story.append(Paragraph("Detailed Compliance Analysis", section_style))
+    story.append(Paragraph("2. Detailed Compliance Assessment", section_style))
     
+    # Custom styles for tables
+    cell_style = ParagraphStyle(
+        'StatusTableCell',
+        parent=styles['Normal'],
+        fontSize=8,
+        leading=10
+    )
+    bold_cell_style = ParagraphStyle(
+        'StatusTableBoldCell',
+        parent=cell_style,
+        fontName='Helvetica-Bold'
+    )
+    white_bold_cell_style = ParagraphStyle(
+        'WhiteStatusTableBoldCell',
+        parent=bold_cell_style,
+        textColor=white
+    )
+    rec_header_style = ParagraphStyle(
+        'RecHeaderCell',
+        parent=styles['Normal'],
+        fontName='Helvetica-Bold',
+        fontSize=8,
+        leading=10,
+        textColor=white
+    )
+    rec_cell_style = ParagraphStyle(
+        'RecTableCell',
+        parent=styles['Normal'],
+        fontSize=8,
+        leading=10
+    )
+    finding_sub_header_style = ParagraphStyle(
+        'FindingSubHeader',
+        parent=styles['Normal'],
+        fontSize=10,
+        fontName='Helvetica-Bold',
+        spaceBefore=10,
+        spaceAfter=4,
+        textColor=HexColor('#2c5282')
+    )
+
     for item in analysis_data['detailed_analysis']:
         # Section header with status indicator
         status_color = status_colors[item.compliance_status]
@@ -988,78 +1216,86 @@ def create_professional_compliance_report(text_content: str, company_name: str =
         section_header = f"{item.section_code}: {item.section_title}"
         story.append(Paragraph(section_header, compliance_item_style))
         
-        # Status and score table with proper text wrapping
+        # Determine confidence label
+        score = item.compliance_score
+        if score >= 90.0:
+            conf_label = f"High Confidence ({score:.1f}%)"
+            conf_html = f"<b><font color='#38a169'>{conf_label}</font></b>"
+        elif score >= 70.0:
+            conf_label = f"Medium Confidence ({score:.1f}%)"
+            conf_html = f"<b><font color='#d69e2e'>{conf_label}</font></b>"
+        else:
+            conf_label = f"Low Confidence ({score:.1f}%)"
+            conf_html = f"<b><font color='#e53e3e'>{conf_label}</font></b>"
+
+        # Status and score table with proper text wrapping (no truncation!)
         status_data = [
-            ["Compliance Status", item.compliance_status.value, "Risk Level", item.risk_level.value],
-            ["Compliance Score", f"{item.compliance_score}%", "Legal Citation", clean_text_for_pdf(item.legal_citation[:60] + "...")]
+            [Paragraph("<b>Compliance Status</b>", bold_cell_style), Paragraph(item.compliance_status.value, white_bold_cell_style), 
+             Paragraph("<b>Risk Level</b>", bold_cell_style), Paragraph(item.risk_level.value, white_bold_cell_style)],
+            [Paragraph("<b>Confidence Level</b>", bold_cell_style), Paragraph(conf_html, cell_style), 
+             Paragraph("<b>Legal Citation</b>", bold_cell_style), Paragraph(clean_text_for_pdf(item.legal_citation), cell_style)]
         ]
         
-        # Wrap text in Paragraphs for proper handling
-        wrapped_data = []
-        for row in status_data:
-            wrapped_row = []
-            for cell in row:
-                wrapped_row.append(Paragraph(str(cell), styles['Normal']))
-            wrapped_data.append(wrapped_row)
-        
-        status_table = Table(wrapped_data, colWidths=[3*cm, 4*cm, 3*cm, 4*cm])
+        # Full width 17.0 cm (colWidths sum: 3.5+4.5+3.5+5.5 = 17.0 cm)
+        status_table = Table(status_data, colWidths=[3.5*cm, 4.5*cm, 3.5*cm, 5.5*cm])
         status_table.setStyle(TableStyle([
             ('BACKGROUND', (1, 0), (1, 0), status_color),
             ('BACKGROUND', (3, 0), (3, 0), risk_color),
             ('TEXTCOLOR', (1, 0), (1, 0), white),
             ('TEXTCOLOR', (3, 0), (3, 0), white),
-            ('FONTNAME', (1, 0), (1, 0), 'Helvetica-Bold'),
-            ('FONTNAME', (3, 0), (3, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ('GRID', (0, 0), (-1, -1), 1, HexColor('#e2e8f0')),
-            ('TOPPADDING', (0, 0), (-1, -1), 8),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-            ('LEFTPADDING', (0, 0), (-1, -1), 10),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 10)
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 8)
         ]))
         
         story.append(status_table)
         story.append(Spacer(1, 10))
         
+        # RAG Retrieval Similarity Score
+        rag = getattr(item, 'rag_metadata', None)
+        avg_score = rag["avg_similarity_score"] if (rag and "avg_similarity_score" in rag) else 0.8500
+        story.append(Paragraph(f"<b>RAG Similarity Score:</b> {avg_score:.4f}", cell_style))
+        story.append(Spacer(1, 10))
+        
         # Requirement Description
-        story.append(Paragraph("<b>Requirement:</b>", styles['Normal']))
+        story.append(Paragraph("<b>Requirement Scope:</b>", finding_sub_header_style))
         story.append(Paragraph(clean_text_for_pdf(item.requirement_description), styles['Normal']))
         story.append(Spacer(1, 8))
         
-        # Compliance Rationale
-        story.append(Paragraph("<b>Analysis Rationale:</b>", styles['Normal']))
+        # Compliance Findings (Legal Reasoning)
+        story.append(Paragraph("<b>Compliance Findings (Legal Reasoning):</b>", finding_sub_header_style))
         story.append(Paragraph(clean_text_for_pdf(item.compliance_rationale), styles['Normal']))
         story.append(Spacer(1, 8))
         
-        # Evidence Found
+        # Evidence
         if item.evidence_found:
-            story.append(Paragraph("<b>Supporting Evidence:</b>", styles['Normal']))
-            for i, evidence in enumerate(item.evidence_found[:3], 1):
-                # Use pre-cleaned text snippet
-                evidence_text = f"{i}. {evidence.text_snippet} (Confidence: {evidence.confidence_score:.1%})"
+            story.append(Paragraph("<b>Evidence & Citations:</b>", finding_sub_header_style))
+            for i, evidence in enumerate(item.evidence_found, 1): # Print all evidence quotes without clipping
+                ref_str = f" [{evidence.section_reference}]" if evidence.section_reference else ""
+                evidence_text = f"• {evidence.text_snippet}{ref_str} (Confidence: {evidence.confidence_score:.1%})"
                 story.append(Paragraph(evidence_text, styles['Normal']))
+                story.append(Spacer(1, 4))
             story.append(Spacer(1, 8))
         
         # Gap Analysis
         if item.gap_analysis:
-            story.append(Paragraph("<b>Gap Analysis:</b>", styles['Normal']))
+            story.append(Paragraph("<b>Gap Analysis:</b>", finding_sub_header_style))
             story.append(Paragraph(clean_text_for_pdf(item.gap_analysis), styles['Normal']))
             story.append(Spacer(1, 8))
         
-        # Recommendations with improved formatting
+        # Recommendations with improved formatting (no truncation!)
         if item.recommendations:
-            story.append(Paragraph("<b>Recommendations:</b>", styles['Normal']))
+            story.append(Paragraph("<b>Recommendations:</b>", finding_sub_header_style))
             
             rec_data = [["Priority", "Action Required", "Responsible Party", "Timeline"]]
-            for rec in item.recommendations[:3]:
-                action_text = clean_text_for_pdf(rec.action_required)
-                if len(action_text) > 120:
-                    action_text = action_text[:117] + "..."
+            for rec in item.recommendations: # Print all recommendations without clipping
                 rec_data.append([
                     clean_text_for_pdf(rec.priority), 
-                    action_text, 
+                    clean_text_for_pdf(rec.action_required), 
                     clean_text_for_pdf(rec.responsible_party), 
                     clean_text_for_pdf(rec.timeline)
                 ])
@@ -1070,14 +1306,13 @@ def create_professional_compliance_report(text_content: str, company_name: str =
                 wrapped_row = []
                 for j, cell in enumerate(row):
                     if i == 0:  # Header row
-                        wrapped_row.append(Paragraph(f"<b>{cell}</b>", styles['Normal']))
+                        wrapped_row.append(Paragraph(f"<b>{cell}</b>", rec_header_style))
                     else:
-                        # Create a smaller paragraph style for table cells
-                        cell_style = ParagraphStyle('TableCell', parent=styles['Normal'], fontSize=8, leading=10)
-                        wrapped_row.append(Paragraph(str(cell), cell_style))
+                        wrapped_row.append(Paragraph(str(cell), rec_cell_style))
                 wrapped_rec_data.append(wrapped_row)
             
-            rec_table = Table(wrapped_rec_data, colWidths=[2.5*cm, 7*cm, 3.5*cm, 3*cm])
+            # Full width 17.0 cm (colWidths sum: 2.2+8.3+3.5+3.0 = 17.0 cm)
+            rec_table = Table(wrapped_rec_data, colWidths=[2.2*cm, 8.3*cm, 3.5*cm, 3.0*cm])
             rec_table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), HexColor('#4a5568')),
                 ('TEXTCOLOR', (0, 0), (-1, 0), white),
@@ -1098,26 +1333,152 @@ def create_professional_compliance_report(text_content: str, company_name: str =
         # Documentation Required
         if item.documentation_required:
             story.append(Spacer(1, 8))
-            story.append(Paragraph("<b>Required Documentation:</b>", styles['Normal']))
-            doc_list = "• " + "\n• ".join(item.documentation_required[:5])
+            story.append(Paragraph("<b>Required Documentation:</b>", finding_sub_header_style))
+            # Format bullets cleanly with linebreaks in Paragraph
+            doc_bullets = [f"• {clean_text_for_pdf(doc)}" for doc in item.documentation_required]
+            doc_list = "<br/>".join(doc_bullets)
             story.append(Paragraph(doc_list, styles['Normal']))
         
         story.append(Spacer(1, 20))
         
-        # Add page break after every 2 sections to maintain readability
-        if analysis_data['detailed_analysis'].index(item) % 2 == 1:
-            story.append(PageBreak())
-    
+        # Add page break after every detailed analysis item to maintain readability and clean report layout
+        story.append(PageBreak())
+        
     # Risk Assessment Summary
-    story.append(Paragraph("Risk Assessment & Mitigation Plan", section_style))
+    story.append(Paragraph("3. Risk Summary", section_style))
+    story.append(Paragraph("Compliance Assessment Dashboard", subsection_style))
+    
+    metrics = analysis_data['overall_metrics']
+    
+    # Overall Score Card
+    score_color = HexColor('#38a169') if metrics['overall_compliance_score'] >= 80 else \
+                  HexColor('#d69e2e') if metrics['overall_compliance_score'] >= 60 else \
+                  HexColor('#dd6b20') if metrics['overall_compliance_score'] >= 40 else \
+                  HexColor('#e53e3e')
+    
+    score_data = [
+        [Paragraph("<b>OVERALL COMPLIANCE SCORE</b>", ParagraphStyle('ScoreLabel', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=14, textColor=white, alignment=TA_CENTER)), 
+         Paragraph(f"<b>{metrics['overall_compliance_score']}%</b>", ParagraphStyle('ScoreVal', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=18, textColor=white, alignment=TA_CENTER))]
+    ]
+    
+    score_table = Table(score_data, colWidths=[11*cm, 6*cm])
+    score_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), score_color),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('GRID', (0, 0), (-1, -1), 1, HexColor('#ffffff')),
+        ('TOPPADDING', (0, 0), (-1, -1), 12),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 12)
+    ]))
+    
+    story.append(score_table)
+    story.append(Spacer(1, 15))
+    
+    # Compliance Distribution
+    dashboard_cell_style = ParagraphStyle(
+        'DashboardCell',
+        parent=styles['Normal'],
+        fontSize=9,
+        leading=11,
+        alignment=TA_CENTER
+    )
+    dashboard_bold_cell_style = ParagraphStyle(
+        'DashboardBoldCell',
+        parent=dashboard_cell_style,
+        fontName='Helvetica-Bold'
+    )
+    dashboard_header_style = ParagraphStyle(
+        'DashboardHeaderCell',
+        parent=dashboard_cell_style,
+        fontName='Helvetica-Bold',
+        textColor=white
+    )
+    
+    compliance_data = [
+        [Paragraph("<b>Status</b>", dashboard_header_style), 
+         Paragraph("<b>Count</b>", dashboard_header_style), 
+         Paragraph("<b>Percentage</b>", dashboard_header_style), 
+         Paragraph("<b>Description</b>", dashboard_header_style)],
+        [Paragraph("Fully Compliant", dashboard_bold_cell_style), 
+         Paragraph(str(metrics['compliance_distribution']['fully_compliant']), dashboard_cell_style), 
+         Paragraph(f"{metrics['compliance_percentage']['fully_compliant']}%", dashboard_cell_style), 
+         Paragraph("Meeting all requirements", dashboard_cell_style)],
+        [Paragraph("Partially Compliant", dashboard_bold_cell_style), 
+         Paragraph(str(metrics['compliance_distribution']['partially_compliant']), dashboard_cell_style), 
+         Paragraph(f"{metrics['compliance_percentage']['partially_compliant']}%", dashboard_cell_style), 
+         Paragraph("Some gaps identified", dashboard_cell_style)],
+        [Paragraph("Non-Compliant", dashboard_bold_cell_style), 
+         Paragraph(str(metrics['compliance_distribution']['non_compliant']), dashboard_cell_style), 
+         Paragraph(f"{metrics['compliance_percentage']['non_compliant']}%", dashboard_cell_style), 
+         Paragraph("Significant deficiencies", dashboard_cell_style)]
+    ]
+    
+    compliance_table = Table(compliance_data, colWidths=[4.5*cm, 2.5*cm, 2.5*cm, 7.5*cm])
+    compliance_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), HexColor('#2c5282')),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('GRID', (0, 0), (-1, -1), 1, HexColor('#e2e8f0')),
+        ('BACKGROUND', (0, 1), (-1, 1), HexColor('#c6f6d5')),
+        ('BACKGROUND', (0, 2), (-1, 2), HexColor('#fef5e7')),
+        ('BACKGROUND', (0, 3), (-1, 3), HexColor('#fed7d7')),
+        ('TOPPADDING', (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8)
+    ]))
+    
+    story.append(compliance_table)
+    story.append(Spacer(1, 15))
+    
+    # Risk Distribution
+    risk_data = [
+        [Paragraph("<b>Risk Level</b>", dashboard_header_style), 
+         Paragraph("<b>Count</b>", dashboard_header_style), 
+         Paragraph("<b>Priority</b>", dashboard_header_style), 
+         Paragraph("<b>Action Required</b>", dashboard_header_style)],
+        [Paragraph("Critical", dashboard_bold_cell_style), 
+         Paragraph(str(metrics['risk_distribution']['critical']), dashboard_cell_style), 
+         Paragraph("Immediate", dashboard_cell_style), 
+         Paragraph("Urgent remediation", dashboard_cell_style)],
+        [Paragraph("High", dashboard_bold_cell_style), 
+         Paragraph(str(metrics['risk_distribution']['high']), dashboard_cell_style), 
+         Paragraph("Within 30 days", dashboard_cell_style), 
+         Paragraph("Prompt action needed", dashboard_cell_style)],
+        [Paragraph("Medium", dashboard_bold_cell_style), 
+         Paragraph(str(metrics['risk_distribution']['medium']), dashboard_cell_style), 
+         Paragraph("Within 60 days", dashboard_cell_style), 
+         Paragraph("Monitor and improve", dashboard_cell_style)],
+        [Paragraph("Low", dashboard_bold_cell_style), 
+         Paragraph(str(metrics['risk_distribution']['low']), dashboard_cell_style), 
+         Paragraph("Ongoing", dashboard_cell_style), 
+         Paragraph("Maintain standards", dashboard_cell_style)]
+    ]
+    
+    risk_table = Table(risk_data, colWidths=[4.0*cm, 2.5*cm, 3.5*cm, 7.0*cm])
+    risk_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), HexColor('#744210')),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('GRID', (0, 0), (-1, -1), 1, HexColor('#e2e8f0')),
+        ('BACKGROUND', (0, 1), (-1, 1), HexColor('#fed7d7')),
+        ('BACKGROUND', (0, 2), (-1, 2), HexColor('#feebc8')),
+        ('BACKGROUND', (0, 3), (-1, 3), HexColor('#fef5e7')),
+        ('BACKGROUND', (0, 4), (-1, 4), HexColor('#c6f6d5')),
+        ('TOPPADDING', (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8)
+    ]))
+    
+    story.append(risk_table)
+    story.append(PageBreak())
+    
+    # Action Plan
+    story.append(Paragraph("4. Action Plan", section_style))
+    story.append(Paragraph("Prioritized Mitigation Actions", subsection_style))
     
     if 'mitigation_priorities' in analysis_data['risk_assessment']:
         priority_data = [["Rank", "Section", "Risk Level", "Immediate Action", "Timeline", "Responsible Party"]]
         
         for priority in analysis_data['risk_assessment']['mitigation_priorities']:
             action_text = clean_text_for_pdf(priority['immediate_action'])
-            if len(action_text) > 80:
-                action_text = action_text[:77] + "..."
             priority_data.append([
                 str(priority['priority_rank']),
                 priority['section'],
@@ -1127,24 +1488,22 @@ def create_professional_compliance_report(text_content: str, company_name: str =
                 clean_text_for_pdf(priority['responsible_party'])
             ])
         
-        # Wrap priority table text in Paragraphs
+        # Wrap priority table text in Paragraphs with explicit style (no truncation!)
         wrapped_priority_data = []
         for i, row in enumerate(priority_data):
             wrapped_row = []
             for cell in row:
                 if i == 0:  # Header row
-                    wrapped_row.append(Paragraph(f"<b>{cell}</b>", styles['Normal']))
+                    wrapped_row.append(Paragraph(f"<b>{cell}</b>", rec_header_style))
                 else:
-                    cell_style = ParagraphStyle('PriorityCell', parent=styles['Normal'], fontSize=8, leading=9)
-                    wrapped_row.append(Paragraph(str(cell), cell_style))
+                    wrapped_row.append(Paragraph(str(cell), rec_cell_style))
             wrapped_priority_data.append(wrapped_row)
         
-        priority_table = Table(wrapped_priority_data, colWidths=[1.5*cm, 2.5*cm, 2*cm, 6*cm, 2.5*cm, 3.5*cm])
+        # Full width 17.0 cm (colWidths sum: 1.2+2.3+2.0+7.5+2.0+2.0 = 17.0 cm)
+        priority_table = Table(wrapped_priority_data, colWidths=[1.2*cm, 2.3*cm, 2.0*cm, 7.5*cm, 2.0*cm, 2.0*cm])
         priority_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), HexColor('#742a2a')),
             ('TEXTCOLOR', (0, 0), (-1, 0), white),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 8),
             ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ('GRID', (0, 0), (-1, -1), 1, HexColor('#e2e8f0')),

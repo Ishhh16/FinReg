@@ -63,9 +63,6 @@ graph TD
 
 ---
 
-## 📸 Screenshots
-
-*Placeholder: Place dashboard, upload wizard, and generated report PDF screenshots here.*
 
 ---
 

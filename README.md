@@ -20,7 +20,6 @@ graph TD
     FE -->|API Requests| BE[FastAPI Backend]
     
     subgraph Backend Pipeline
-        BE -->|Lifespan Startup| DB_Conn[(PostgreSQL)]
         BE -->|1. Validate & Sanitize| Val[PDF Validator]
         Val -->|2. Extract Text| Ext[PyMuPDF Extractor]
         Ext -->|3. Retrieve Regulations| RAG_Reg[ChromaDB Vector Store]
@@ -39,6 +38,7 @@ graph TD
     BE -->|JSON Response| FE
     FE -->|Download Cache PDF| FE_Stream[File Download Stream]
 ```
+
 
 ---
 

@@ -510,33 +510,50 @@ Here is the context data:
 Please generate the report list of findings in the exact JSON schema requested.
 """
         
-        # 3. Call Gemini API
-        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY environment variable is not set!")
+        # 3. Resolve API keys pool
+        raw_keys = os.getenv("GEMINI_API_KEYS")
+        if raw_keys:
+            api_keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+        else:
+            api_keys = []
+            
+        # Fallback to single key
+        if not api_keys:
+            single_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            if single_key:
+                api_keys = [single_key]
+                
+        if not api_keys:
+            raise ValueError("Neither GEMINI_API_KEYS nor GEMINI_API_KEY environment variables are set!")
 
         import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        
-        model = genai.GenerativeModel("gemini-2.5-flash")
         
         generation_config = {
             "response_mime_type": "application/json",
             "response_schema": ComplianceReportSchema
         }
         
-        logger.info("⏳ Invoking Gemini 2.5 Flash API for compliance analysis (Single Call)...")
-        try:
-            response = model.generate_content(prompt, generation_config=generation_config)
-            raw_output = response.text
+        findings_json = None
+        last_error = None
+        
+        for idx, key in enumerate(api_keys):
+            logger.info(f"⏳ Invoking Gemini 2.5 Flash API with Key {idx+1}/{len(api_keys)}...")
             try:
-                findings_json = json.loads(raw_output)
-                logger.info("✅ Gemini successfully returned valid JSON matching the schema.")
-            except json.JSONDecodeError as je:
-                logger.warning(f"⚠️ Warning: Gemini returned invalid JSON. Error: {je}")
-                logger.info("🧹 Attempting automatic JSON repair/retry prompt...")
+                genai.configure(api_key=key)
+                model = genai.GenerativeModel("gemini-2.5-flash")
                 
-                repair_prompt = f"""The previous response returned invalid JSON which failed parsing:
+                response = model.generate_content(prompt, generation_config=generation_config)
+                raw_output = response.text
+                
+                try:
+                    findings_json = json.loads(raw_output)
+                    logger.info("✅ Gemini successfully returned valid JSON matching the schema.")
+                    break  # Success, exit the key rotation loop!
+                except json.JSONDecodeError as je:
+                    logger.warning(f"⚠️ Warning: Gemini returned invalid JSON. Error: {je}")
+                    logger.info("🧹 Attempting automatic JSON repair/retry prompt...")
+                    
+                    repair_prompt = f"""The previous response returned invalid JSON which failed parsing:
 Error: {je}
 Response received:
 ```json
@@ -547,11 +564,24 @@ Please fix the formatting, ensuring it is 100% valid JSON and conforms strictly 
 - The top-level key must be "findings" (a list of objects).
 - Each finding object must contain: requirement_code, regulation_name, status, reasoning, evidence_company, evidence_regulation, remediation, confidence_score.
 """
-                repair_response = model.generate_content(repair_prompt, generation_config=generation_config)
-                findings_json = json.loads(repair_response.text)
-                logger.info("🎉 Repair successful! Cleaned JSON parsed successfully on retry.")
-        except Exception as e:
-            raise RuntimeError(f"Gemini compliance analysis call failed: {e}")
+                    repair_response = model.generate_content(repair_prompt, generation_config=generation_config)
+                    findings_json = json.loads(repair_response.text)
+                    logger.info("🎉 Repair successful! Cleaned JSON parsed successfully on retry.")
+                    break  # Success, exit key rotation loop!
+                    
+            except Exception as e:
+                err_msg = str(e).lower()
+                # Check for quota exceeded (429) rate limit indicators
+                if "429" in err_msg or "quota" in err_msg or "resource_exhausted" in err_msg or "limit" in err_msg:
+                    logger.warning(f"⚠️ API Key {idx+1} rate limit/quota hit. Error: {e}. Rotating to next key...")
+                    last_error = e
+                    continue
+                else:
+                    logger.error(f"❌ Gemini execution failed on API Key {idx+1} with non-quota error: {e}")
+                    raise RuntimeError(f"Gemini compliance analysis call failed: {e}")
+        
+        if findings_json is None:
+            raise RuntimeError(f"All configured Gemini API keys have exhausted their quota for today. Last error: {last_error}")
 
         # 4. Map the Gemini findings JSON into DetailedComplianceItem objects in the framework
         findings = findings_json.get("findings", [])
